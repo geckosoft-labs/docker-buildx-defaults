@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Installs docker-buildx-cache as the current user's docker-buildx (Linux and
+# Installs docker-buildx-defaults as the current user's docker-buildx (Linux and
 # macOS; on Windows, install.ps1), from a release: the latest, or the given
 # one, checked against its SHA256SUMS.
 #
 # Usage: install.sh [<version>, e.g. v0.1.0]
-#   or: curl -fsSL https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-cache/main/install.sh | bash
+#   or: curl -fsSL https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-defaults/main/install.sh | bash
 set -euo pipefail
 
-REPO=geckosoft-labs/docker-buildx-cache
+REPO=geckosoft-labs/docker-buildx-defaults
 version=${1:-latest}
 
 case "$(uname -s)" in
@@ -25,7 +25,7 @@ if [ "$version" = latest ]; then
 else
   base=https://github.com/$REPO/releases/download/$version
 fi
-asset=docker-buildx-cache-$os-$arch
+asset=docker-buildx-defaults-$os-$arch
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -43,13 +43,13 @@ fi
 
 config="${DOCKER_CONFIG:-$HOME/.docker}"
 target="$config/cli-plugins/docker-buildx"
-real="$config/docker-buildx-cache/docker-buildx"
+real="$config/docker-buildx-defaults/docker-buildx"
 
 # A docker-buildx already in the user's directory that isn't the wrapper is
 # the real one (a manual install, or a symlink to Docker Desktop's): it moves
 # aside, where the wrapper finds it. The real one rejects the argument, which
 # is the answer looked for, so its error is not shown.
-if [[ -e "$target" || -L "$target" ]] && ! "$target" docker-buildx-cache-version >/dev/null 2>&1; then
+if [[ -e "$target" || -L "$target" ]] && ! "$target" docker-buildx-defaults-version >/dev/null 2>&1; then
   if [[ -e "$real" || -L "$real" ]]; then
     echo "Both $target and $real exist: remove the one that isn't the real docker-buildx" >&2
     exit 1
@@ -61,7 +61,7 @@ fi
 
 mkdir -p "$(dirname "$target")"
 install -m 0755 "$tmp/$asset" "$target"
-echo "Installed $("$target" docker-buildx-cache-version) as $target"
+echo "Installed $("$target" docker-buildx-defaults-version) as $target"
 
 # Checks that the wrapper finds the real docker-buildx
 docker buildx version

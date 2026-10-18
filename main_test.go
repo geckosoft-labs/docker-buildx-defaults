@@ -77,7 +77,7 @@ func TestReadsStdin(t *testing.T) {
 
 // clearCI unsets the variables of CI that branch reads
 func clearCI(t *testing.T) {
-	for _, v := range []string{"DOCKER_BUILDX_CACHE_BRANCH", "GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_REF_TYPE"} {
+	for _, v := range []string{"DOCKER_BUILDX_DEFAULTS_BRANCH", "GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_REF_TYPE"} {
 		t.Setenv(v, "")
 	}
 }
@@ -120,8 +120,8 @@ func TestBranch(t *testing.T) {
 		{map[string]string{"GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "main"}, "main"},
 		{map[string]string{"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v1.0"}, ""},
 		{map[string]string{"GITHUB_HEAD_REF": "feature/pr", "GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "12/merge"}, "feature/pr"},
-		{map[string]string{"DOCKER_BUILDX_CACHE_BRANCH": "refs/heads/feature/tc"}, "feature/tc"},
-		{map[string]string{"DOCKER_BUILDX_CACHE_BRANCH": "<default>"}, "main"},
+		{map[string]string{"DOCKER_BUILDX_DEFAULTS_BRANCH": "refs/heads/feature/tc"}, "feature/tc"},
+		{map[string]string{"DOCKER_BUILDX_DEFAULTS_BRANCH": "<default>"}, "main"},
 	} {
 		clearCI(t)
 		for k, v := range c.env {
@@ -216,8 +216,8 @@ func TestCacheSets(t *testing.T) {
 			"--set", from(reg+"/b", "main"),
 		}},
 	} {
-		t.Setenv("DOCKER_BUILDX_CACHE_FROM", c.from)
-		t.Setenv("DOCKER_BUILDX_CACHE_TO", c.to)
+		t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_FROM", c.from)
+		t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_TO", c.to)
 		if got := cacheSets(definition(dir)); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("from %q to %q:\n got %q\nwant %q", c.from, c.to, got, c.want)
 		}
@@ -228,22 +228,22 @@ func TestCacheSetsAddsNothing(t *testing.T) {
 	dir := checkoutDir(t, "main")
 	clearCI(t)
 
-	t.Setenv("DOCKER_BUILDX_CACHE_FROM", "")
-	t.Setenv("DOCKER_BUILDX_CACHE_TO", "")
+	t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_FROM", "")
+	t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_TO", "")
 	if got := cacheSets(definition(dir)); got != nil {
 		t.Errorf("no locations: %q", got)
 	}
 
 	down := unreachable(t)
-	t.Setenv("DOCKER_BUILDX_CACHE_FROM", down)
-	t.Setenv("DOCKER_BUILDX_CACHE_TO", down)
+	t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_FROM", down)
+	t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_TO", down)
 	if got := cacheSets(definition(dir)); got != nil {
 		t.Errorf("unreachable registry: %q", got)
 	}
 
 	reg := registry(t)
-	t.Setenv("DOCKER_BUILDX_CACHE_FROM", reg)
-	t.Setenv("DOCKER_BUILDX_CACHE_TO", reg)
+	t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_FROM", reg)
+	t.Setenv("DOCKER_BUILDX_DEFAULTS_CACHE_TO", reg)
 	if got := cacheSets([]byte("not json")); got != nil {
 		t.Errorf("not a definition: %q", got)
 	}

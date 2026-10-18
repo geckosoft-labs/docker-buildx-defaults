@@ -30,17 +30,17 @@ var version = "dev"
 const (
 	// Answered by the wrapper itself: the install scripts use it to tell the
 	// wrapper from the real docker-buildx
-	versionArg = "docker-buildx-cache-version"
+	versionArg = "docker-buildx-defaults-version"
 	// Where the install scripts move a real docker-buildx found in the user's
 	// plugin directory, under the Docker config directory; not in
 	// cli-plugins, where the docker CLI would list it as an invalid plugin
-	realDir = "docker-buildx-cache"
+	realDir = "docker-buildx-defaults"
 )
 
 func main() {
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == versionArg {
-		fmt.Println("docker-buildx-cache", version)
+		fmt.Println("docker-buildx-defaults", version)
 		return
 	}
 	buildx, err := findBuildx()
@@ -64,12 +64,12 @@ func main() {
 }
 
 func fail(err error) {
-	fmt.Fprintln(os.Stderr, "docker-buildx-cache:", err)
+	fmt.Fprintln(os.Stderr, "docker-buildx-defaults:", err)
 	os.Exit(1)
 }
 
 func warn(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "docker-buildx-cache: "+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "docker-buildx-defaults: "+format+"\n", a...)
 }
 
 // readsStdin tells whether bake reads its definition from stdin (--file -)
@@ -186,18 +186,18 @@ func cacheSets(def []byte) []string {
 	return sets
 }
 
-// locations are where the cache is imported from (DOCKER_BUILDX_CACHE_FROM,
-// comma-separated, in order) and exported to (DOCKER_BUILDX_CACHE_TO, none
+// locations are where the cache is imported from (DOCKER_BUILDX_DEFAULTS_CACHE_FROM,
+// comma-separated, in order) and exported to (DOCKER_BUILDX_DEFAULTS_CACHE_TO, none
 // if empty): each a registry with an optional path, host[:port][/path], e.g.
 // registry.example/dev. Who reads and writes where is up to the registry's
 // access control (see README.md).
 func locations() (from []string, to string) {
-	for _, l := range strings.Split(os.Getenv("DOCKER_BUILDX_CACHE_FROM"), ",") {
+	for _, l := range strings.Split(os.Getenv("DOCKER_BUILDX_DEFAULTS_CACHE_FROM"), ",") {
 		if l = location(l); l != "" {
 			from = append(from, l)
 		}
 	}
-	return from, location(os.Getenv("DOCKER_BUILDX_CACHE_TO"))
+	return from, location(os.Getenv("DOCKER_BUILDX_DEFAULTS_CACHE_TO"))
 }
 
 func location(s string) string {
@@ -272,10 +272,10 @@ func inspect(dir string) checkout {
 }
 
 // branch is the branch being built, "" if unknown. CI checks out a commit
-// (detached HEAD): TeamCity's builds name the branch in DOCKER_BUILDX_CACHE_BRANCH
+// (detached HEAD): TeamCity's builds name the branch in DOCKER_BUILDX_DEFAULTS_BRANCH
 // (see README.md), GitHub's jobs in their own variables.
 func branch(dir, defaultBranch string) string {
-	b := os.Getenv("DOCKER_BUILDX_CACHE_BRANCH")
+	b := os.Getenv("DOCKER_BUILDX_DEFAULTS_BRANCH")
 	if b == "" {
 		b, _ = git(dir, "symbolic-ref", "--quiet", "--short", "HEAD")
 	}
@@ -349,9 +349,9 @@ func findBuildx() (string, error) {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	if p := os.Getenv("DOCKER_BUILDX_CACHE_BUILDX"); p != "" {
+	if p := os.Getenv("DOCKER_BUILDX_DEFAULTS_BUILDX"); p != "" {
 		if _, err := os.Stat(p); err != nil {
-			return "", fmt.Errorf("DOCKER_BUILDX_CACHE_BUILDX: %w", err)
+			return "", fmt.Errorf("DOCKER_BUILDX_DEFAULTS_BUILDX: %w", err)
 		}
 		return p, nil
 	}
@@ -386,7 +386,7 @@ func findBuildx() (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("no docker-buildx found besides this wrapper (in %s); set DOCKER_BUILDX_CACHE_BUILDX to its path", strings.Join(dirs, ", "))
+	return "", fmt.Errorf("no docker-buildx found besides this wrapper (in %s); set DOCKER_BUILDX_DEFAULTS_BUILDX to its path", strings.Join(dirs, ", "))
 }
 
 // extraPluginDirs reads cliPluginsExtraDirs from the docker CLI config, which

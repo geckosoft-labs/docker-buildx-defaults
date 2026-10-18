@@ -16,7 +16,7 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 wi
   fi
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
     -ldflags "-s -w -X main.version=$version" \
-    -o "dist/docker-buildx-cache-$os-$arch$ext" .
+    -o "dist/docker-buildx-defaults-$os-$arch$ext" .
 done
-(cd dist && sha256sum docker-buildx-cache-* > SHA256SUMS)
+(cd dist && sha256sum docker-buildx-defaults-* > SHA256SUMS)
 cat dist/SHA256SUMS

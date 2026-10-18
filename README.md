@@ -1,4 +1,4 @@
-# docker-buildx-cache
+# docker-buildx-defaults
 
 Shares the Docker layer cache of Compose builds through a registry, with no
 change to the projects: after a one-time setup, `docker compose up --build`
@@ -9,14 +9,14 @@ where they ran; only the layers are shared.
 ## How it works
 
 Docker Compose builds by running `docker-buildx bake --file -`, with the build
-definition on stdin. docker-buildx-cache is a `docker-buildx` that wraps the
+definition on stdin. docker-buildx-defaults is a `docker-buildx` that wraps the
 real one, installed where the docker CLI and Compose look for plugins before
 the system ones. For each service of the definition that is built from a git
 checkout, it adds:
 
 - `cache-from` the current branch, then the repository's default branch, in
-  each location of `DOCKER_BUILDX_CACHE_FROM`;
-- `cache-to` the current branch, in the location `DOCKER_BUILDX_CACHE_TO`,
+  each location of `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`;
+- `cache-to` the current branch, in the location `DOCKER_BUILDX_DEFAULTS_CACHE_TO`,
   with `mode=max` (intermediate stages too) and `ignore-error=true` (a failed
   upload doesn't fail the build).
 
@@ -29,7 +29,7 @@ branch `feature/x`, in the location `registry.example/dev`.
 Who reads and writes which locations is up to you, and to the registry's
 access control (see [Registry](#registry)). For example:
 
-| | `DOCKER_BUILDX_CACHE_FROM` | `DOCKER_BUILDX_CACHE_TO` |
+| | `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | `DOCKER_BUILDX_DEFAULTS_CACHE_TO` |
 |---|---|---|
 | One cache for everyone | `registry.example` | `registry.example` |
 | Developers | `registry.example/dev,registry.example/ci` | `registry.example/dev` |
@@ -53,7 +53,7 @@ before, offline too.
 
 Everything else (`docker buildx ...`, bake files of your own, builds with no
 git remote) passes through unchanged, and so does everything when neither
-`DOCKER_BUILDX_CACHE_FROM` nor `DOCKER_BUILDX_CACHE_TO` is set. The
+`DOCKER_BUILDX_DEFAULTS_CACHE_FROM` nor `DOCKER_BUILDX_DEFAULTS_CACHE_TO` is set. The
 locations on a registry that's unreachable are left out, and the build goes
 on without them. Compose doesn't show the wrapper's warnings: the cache is in
 use when `docker compose build --progress plain` shows `importing cache
@@ -91,7 +91,7 @@ deserves a look:
 
 2. The locations, in the environment of the shell profile (or wherever
    `docker compose` is started from, e.g. an IDE), e.g.
-   `export DOCKER_BUILDX_CACHE_FROM=registry.example/dev,registry.example/ci DOCKER_BUILDX_CACHE_TO=registry.example/dev`;
+   `export DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev`;
    then `docker login` to their registries.
 
 3. Install the wrapper, from the latest release (or the one given):
@@ -99,34 +99,34 @@ deserves a look:
    - Linux and macOS:
 
      ```sh
-     curl -fsSL https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-cache/main/install.sh | bash
+     curl -fsSL https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-defaults/main/install.sh | bash
      # or, from a clone: ./install.sh [v0.1.0]
      ```
 
    - Windows (PowerShell):
 
      ```powershell
-     irm https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-cache/main/install.ps1 | iex
+     irm https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-defaults/main/install.ps1 | iex
      # or, from a clone: .\install.ps1 [-Version v0.1.0]
      ```
 
    The binary is checked against the release's `SHA256SUMS`. A real
    `docker-buildx` found in the user's plugin directory moves aside (to
-   `~/.docker/docker-buildx-cache/`), where the wrapper finds it. The scripts
+   `~/.docker/docker-buildx-defaults/`), where the wrapper finds it. The scripts
    end with `docker buildx version`, which must print the real buildx's
    version.
 
 `./uninstall.sh` removes the wrapper and puts back what `install.sh` moved.
 
 Each release also has build provenance attestations:
-`gh attestation verify <binary> --repo geckosoft-labs/docker-buildx-cache`.
+`gh attestation verify <binary> --repo geckosoft-labs/docker-buildx-defaults`.
 
 ## CI
 
 On runners and build agents, install the release binary as
 `/usr/local/lib/docker/cli-plugins/docker-buildx` (Linux), which the docker
 CLI searches before the package's `/usr/libexec/docker/cli-plugins`, and give
-the jobs `DOCKER_BUILDX_CACHE_FROM`, `DOCKER_BUILDX_CACHE_TO` and the docker
+the jobs `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`, `DOCKER_BUILDX_DEFAULTS_CACHE_TO` and the docker
 login of the registry's CI user.
 
 CI checks out a commit, not a branch, so the wrapper finds the branch
@@ -135,20 +135,20 @@ elsewhere:
 - GitHub Actions: `GITHUB_HEAD_REF` (the source branch of a pull request), or
   `GITHUB_REF_NAME` when the run is for a branch. A tag's build imports the
   default branch and exports nothing.
-- TeamCity: set the parameter `env.DOCKER_BUILDX_CACHE_BRANCH` to
+- TeamCity: set the parameter `env.DOCKER_BUILDX_DEFAULTS_BRANCH` to
   `%teamcity.build.branch%` (e.g. in the root project, for every build):
   `refs/heads/` is dropped, and `<default>` is the default branch.
   TeamCity's server-side checkout leaves no `.git` on the agent: builds
   checked out so don't use the cache.
-- Elsewhere: `DOCKER_BUILDX_CACHE_BRANCH`.
+- Elsewhere: `DOCKER_BUILDX_DEFAULTS_BRANCH`.
 
 ## Registry
 
 Any registry that accepts BuildKit's cache manifests (OCI image manifests
 with a `application/vnd.buildkit.cacheconfig.v0` config). It needs:
 
-- read access to the locations of `DOCKER_BUILDX_CACHE_FROM`, and write
-  access to the one of `DOCKER_BUILDX_CACHE_TO`, for the users of each: e.g.
+- read access to the locations of `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`, and write
+  access to the one of `DOCKER_BUILDX_DEFAULTS_CACHE_TO`, for the users of each: e.g.
   developers write `dev/**`, and only CI writes `ci/**`;
 - expiry: every export replaces a tag, leaving the previous manifest
   untagged, and branches stop being built.
@@ -182,10 +182,10 @@ go on (`ignore-error`).
 
 | Environment variable | Default | |
 |---|---|---|
-| `DOCKER_BUILDX_CACHE_FROM` | none | The locations to import from, comma-separated, in order (see [How it works](#how-it-works)) |
-| `DOCKER_BUILDX_CACHE_TO` | none | The location to export to |
-| `DOCKER_BUILDX_CACHE_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)) |
-| `DOCKER_BUILDX_CACHE_BUILDX` | found by the wrapper | The real `docker-buildx`, if the wrapper doesn't find it |
+| `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | none | The locations to import from, comma-separated, in order (see [How it works](#how-it-works)) |
+| `DOCKER_BUILDX_DEFAULTS_CACHE_TO` | none | The location to export to |
+| `DOCKER_BUILDX_DEFAULTS_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)) |
+| `DOCKER_BUILDX_DEFAULTS_BUILDX` | found by the wrapper | The real `docker-buildx`, if the wrapper doesn't find it |
 
 The default branch is the one `origin/HEAD` points to; `main` when the clone
 didn't record it (`git remote set-head origin --auto` records it), as in CI's

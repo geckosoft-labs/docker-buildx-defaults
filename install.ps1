@@ -1,4 +1,4 @@
-# Installs docker-buildx-cache as the current user's docker-buildx (Windows),
+# Installs docker-buildx-defaults as the current user's docker-buildx (Windows),
 # from a release: the latest, or the given one, checked against its
 # SHA256SUMS.
 #
@@ -6,7 +6,7 @@
 param([string]$Version = "latest")
 $ErrorActionPreference = "Stop"
 
-$Repo = "geckosoft-labs/docker-buildx-cache"
+$Repo = "geckosoft-labs/docker-buildx-defaults"
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   "AMD64" { "amd64" }
   "ARM64" { "arm64" }
@@ -17,11 +17,11 @@ $base = if ($Version -eq "latest") {
 } else {
   "https://github.com/$Repo/releases/download/$Version"
 }
-$asset = "docker-buildx-cache-windows-$arch.exe"
+$asset = "docker-buildx-defaults-windows-$arch.exe"
 
 $config = if ($env:DOCKER_CONFIG) { $env:DOCKER_CONFIG } else { Join-Path $env:USERPROFILE ".docker" }
 $target = Join-Path $config "cli-plugins\docker-buildx.exe"
-$real = Join-Path $config "docker-buildx-cache\docker-buildx.exe"
+$real = Join-Path $config "docker-buildx-defaults\docker-buildx.exe"
 
 $tmp = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid()))
 try {
@@ -39,7 +39,7 @@ try {
   # error is neither shown nor raised.
   if (Test-Path $target) {
     $ErrorActionPreference = "Continue"
-    & $target docker-buildx-cache-version *> $null
+    & $target docker-buildx-defaults-version *> $null
     $isWrapper = $LASTEXITCODE -eq 0
     $ErrorActionPreference = "Stop"
     if (-not $isWrapper) {
@@ -52,7 +52,7 @@ try {
 
   New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
   Move-Item -Force (Join-Path $tmp $asset) $target
-  Write-Output "Installed $(& $target docker-buildx-cache-version) as $target"
+  Write-Output "Installed $(& $target docker-buildx-defaults-version) as $target"
 } finally {
   Remove-Item -Recurse -Force $tmp
 }
