@@ -55,9 +55,31 @@ Everything else (`docker buildx ...`, bake files of your own, builds with no
 git remote) passes through unchanged, and so does everything when neither
 `DOCKER_BUILDX_CACHE_FROM` nor `DOCKER_BUILDX_CACHE_TO` is set. The
 locations on a registry that's unreachable are left out, and the build goes
-on without them. Compose doesn't
-show the wrapper's warnings: the cache is in use when `docker compose build
---progress plain` shows `importing cache manifest from <registry>/...` steps.
+on without them. Compose doesn't show the wrapper's warnings: the cache is in
+use when `docker compose build --progress plain` shows `importing cache
+manifest from <registry>/...` steps.
+
+### Reading the build output
+
+Every build starts by importing each ref of `cache-from`, every time, also
+when the local cache has everything: BuildKit asks the registry what it has
+before it builds. A ref nobody exported yet (a branch nobody built in that
+location, e.g. the default branch before CI or anyone builds it) shows as an
+error, and the build goes on without it:
+
+```
+#65 [web] importing cache manifest from registry.example/dev/acme/shop/web/linux-amd64:main
+#65 ERROR: failed to configure registry cache importer: registry.example/dev/acme/shop/web/linux-amd64:main: not found
+```
+
+That's expected; the ref appears with the first build that exports it. What
+deserves a look:
+
+- `401 Unauthorized` or `403 Forbidden` on import or export: the login
+  (`docker login <registry>`), or the registry's access control for that
+  location;
+- an error in an `exporting cache to registry` step: the export failed (it
+  doesn't fail the build, `ignore-error=true`), e.g. the registry is full.
 
 ## Setup (once per machine)
 
