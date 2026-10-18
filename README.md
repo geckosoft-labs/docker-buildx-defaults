@@ -1,24 +1,59 @@
 # docker-buildx-defaults
 
-Shares the Docker layer cache of Compose builds through a registry, with no
-change to the projects: after a one-time setup, `docker compose up --build`
-(and `docker compose build`) reuse the layers that anyone already built, on
-any branch of the same repository, developers and CI alike. Builds still run
-where they ran; only the layers are shared.
+Defaults for the builds of Docker Compose that Compose has no global setting
+for, with no change to the projects:
+
+- zstd compression of the images and of the cache, instead of BuildKit's
+  gzip: faster builds, and smaller uploads.
+- a layer cache shared through a registry: after a one-time setup,
+  `docker compose up --build` (and `docker compose build`) reuse the layers
+  that anyone already built, on any branch of the same repository,
+  developers and CI alike. Builds still run where they ran; only the layers
+  are shared.
 
 ## How it works
 
 Docker Compose builds by running `docker-buildx bake --file -`, with the build
-definition on stdin. docker-buildx-defaults is a `docker-buildx` that wraps the
-real one, installed where the docker CLI and Compose look for plugins before
-the system ones. For each service of the definition that is built from a git
-checkout, it adds:
+definition on stdin. docker-buildx-defaults is a `docker-buildx` that wraps
+the real one, installed where the docker CLI and Compose look for plugins
+before the system ones. It adds its settings to each target of the
+definition that comes from a Compose service.
+
+Everything else (`docker buildx ...`, bake files of your own) passes through
+unchanged. Compose doesn't show the wrapper's warnings;
+`docker buildx docker-buildx-defaults` shows the settings in effect, and where
+each comes from (see [Settings](#settings)).
+
+### Compression
+
+BuildKit compresses layers with gzip, and has no setting for another default.
+With `DOCKER_BUILDX_DEFAULTS_COMPRESSION=zstd` (the default), the wrapper
+adds `compression=zstd`:
+
+- to the image outputs that load into the local image store, which is where
+  Compose's builds go (`type=docker`, or `type=image` without push). Pushed
+  images (`docker compose build --push`) keep gzip: whoever pulls them may
+  not read zstd. A project's own `compression=` is left alone.
+- to the exports of the [cache](#cache), when there's one.
+
+Layers that are already compressed (pulled base images, layers imported from
+the cache) are kept as they are; only the ones built here are compressed
+with zstd. Exporting the images is the slowest step of many builds once the
+cache has the rest: in a stack with a 5 GB image, zstd cut it from 100 s to
+45 s, and its layers came out 4% smaller. Docker reads zstd layers since
+23.0, containerd since 1.5.
+
+`DOCKER_BUILDX_DEFAULTS_COMPRESSION=gzip` leaves both to BuildKit.
+
+### Cache
+
+For each service that is built from a git checkout, the wrapper adds:
 
 - `cache-from` the current branch, then the repository's default branch, in
   each location of `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`;
-- `cache-to` the current branch, in the location `DOCKER_BUILDX_DEFAULTS_CACHE_TO`,
-  with `mode=max` (intermediate stages too) and `ignore-error=true` (a failed
-  upload doesn't fail the build).
+- `cache-to` the current branch, in the location
+  `DOCKER_BUILDX_DEFAULTS_CACHE_TO`, with `mode=max` (intermediate stages too)
+  and `ignore-error=true` (a failed upload doesn't fail the build).
 
 A location is a registry with an optional path, `host[:port][/path]`. The
 refs are `<location>/<org>/<repo>/<service>/<platform>:<branch>`, from the
@@ -51,13 +86,9 @@ The local build cache still comes first: the registry is only asked for the
 steps that aren't cached locally, so rebuilding the same branch is as fast as
 before, offline too.
 
-Everything else (`docker buildx ...`, bake files of your own, builds with no
-git remote) passes through unchanged, and so does everything when neither
-`DOCKER_BUILDX_DEFAULTS_CACHE_FROM` nor `DOCKER_BUILDX_DEFAULTS_CACHE_TO` is set. The
-locations on a registry that's unreachable are left out, and the build goes
-on without them. Compose doesn't show the wrapper's warnings: the cache is in
-use when `docker compose build --progress plain` shows `importing cache
-manifest from <registry>/...` steps.
+Services built without a git remote get no cache, and neither does anything
+when no location is set. The locations on a registry that's unreachable are
+left out, and the build goes on without them.
 
 ### Reading the build output
 
@@ -83,38 +114,46 @@ deserves a look:
 
 ## Setup (once per machine)
 
-1. The containerd image store, which the classic one can't export a cache
-   from: Docker Desktop → Settings → General → "Use containerd for pulling and
-   storing images"; Docker Engine: `"features": {"containerd-snapshotter":
-   true}` in `/etc/docker/daemon.json`, then restart it. Images in the old
-   store aren't seen after the switch: the first builds are cold.
-
-2. The locations, in the environment of the shell profile (or wherever
-   `docker compose` is started from, e.g. an IDE), e.g.
-   `export DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev`;
-   then `docker login` to their registries.
-
-3. Install the wrapper, from the latest release (or the one given):
+1. Install the wrapper, from the latest release (or the one given):
 
    - Linux and macOS:
 
      ```sh
      curl -fsSL https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-defaults/main/install.sh | bash
-     # or, from a clone: ./install.sh [v0.1.0]
+     # or, from a clone: ./install.sh [v0.2.0]
      ```
 
    - Windows (PowerShell):
 
      ```powershell
      irm https://raw.githubusercontent.com/geckosoft-labs/docker-buildx-defaults/main/install.ps1 | iex
-     # or, from a clone: .\install.ps1 [-Version v0.1.0]
+     # or, from a clone: .\install.ps1 [-Version v0.2.0]
      ```
 
    The binary is checked against the release's `SHA256SUMS`. A real
    `docker-buildx` found in the user's plugin directory moves aside (to
-   `~/.docker/docker-buildx-defaults/`), where the wrapper finds it. The scripts
-   end with `docker buildx version`, which must print the real buildx's
-   version.
+   `~/.docker/docker-buildx-defaults/`), where the wrapper finds it. The
+   scripts end with `docker buildx version`, which must print the real
+   buildx's version.
+
+   From then on, Compose's images are compressed with zstd.
+
+2. For the cache, the containerd image store, which the classic one can't
+   export a cache from: Docker Desktop → Settings → General → "Use
+   containerd for pulling and storing images"; Docker Engine: `"features":
+   {"containerd-snapshotter": true}` in `/etc/docker/daemon.json`, then
+   restart it. Images in the old store aren't seen after the switch: the
+   first builds are cold.
+
+3. The cache's locations, in the config file (see [Settings](#settings)),
+   e.g. `~/.config/docker-buildx-defaults/config` on Linux:
+
+   ```sh
+   DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci
+   DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev
+   ```
+
+   then `docker login` to their registries.
 
 `./uninstall.sh` removes the wrapper and puts back what `install.sh` moved.
 
@@ -126,8 +165,9 @@ Each release also has build provenance attestations:
 On runners and build agents, install the release binary as
 `/usr/local/lib/docker/cli-plugins/docker-buildx` (Linux), which the docker
 CLI searches before the package's `/usr/libexec/docker/cli-plugins`, and give
-the jobs `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`, `DOCKER_BUILDX_DEFAULTS_CACHE_TO` and the docker
-login of the registry's CI user.
+the jobs `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`, `DOCKER_BUILDX_DEFAULTS_CACHE_TO`
+(in their environment, or in the config file of the user they run as) and
+the docker login of the registry's CI user.
 
 CI checks out a commit, not a branch, so the wrapper finds the branch
 elsewhere:
@@ -147,9 +187,9 @@ elsewhere:
 Any registry that accepts BuildKit's cache manifests (OCI image manifests
 with a `application/vnd.buildkit.cacheconfig.v0` config). It needs:
 
-- read access to the locations of `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`, and write
-  access to the one of `DOCKER_BUILDX_DEFAULTS_CACHE_TO`, for the users of each: e.g.
-  developers write `dev/**`, and only CI writes `ci/**`;
+- read access to the locations of `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`, and
+  write access to the one of `DOCKER_BUILDX_DEFAULTS_CACHE_TO`, for the users
+  of each: e.g. developers write `dev/**`, and only CI writes `ci/**`;
 - expiry: every export replaces a tag, leaving the previous manifest
   untagged, and branches stop being built.
 
@@ -178,14 +218,51 @@ zot has no size-based eviction: the retention windows, and a quota on its
 storage, keep it in bounds. When the storage is full, exports fail and builds
 go on (`ignore-error`).
 
+A registry's UI shows the caches as images with no platform, creation time
+or labels: their config is BuildKit's cache graph, not an image's. The
+platform is in the ref.
+
 ## Settings
 
-| Environment variable | Default | |
+Each setting comes from the environment, when the variable is set (even to
+an empty value), else from the user's config file, else its default; an
+empty value is the default.
+
+| Setting | Default | |
 |---|---|---|
-| `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | none | The locations to import from, comma-separated, in order (see [How it works](#how-it-works)) |
-| `DOCKER_BUILDX_DEFAULTS_CACHE_TO` | none | The location to export to |
-| `DOCKER_BUILDX_DEFAULTS_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)) |
+| `DOCKER_BUILDX_DEFAULTS_COMPRESSION` | `zstd` | `zstd` or `gzip` (see [Compression](#compression)) |
+| `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | none | The locations to import the cache from, comma-separated, in order (see [Cache](#cache)) |
+| `DOCKER_BUILDX_DEFAULTS_CACHE_TO` | none | The location to export the cache to |
+| `DOCKER_BUILDX_DEFAULTS_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)); environment only |
 | `DOCKER_BUILDX_DEFAULTS_BUILDX` | found by the wrapper | The real `docker-buildx`, if the wrapper doesn't find it |
+
+The config file has a `KEY=VALUE` line per setting, with the same names;
+blank lines and lines starting with `#` are skipped, and unknown settings are
+errors. It's in the user's config directory:
+
+- Linux: `$XDG_CONFIG_HOME/docker-buildx-defaults/config`, by default
+  `~/.config/docker-buildx-defaults/config`;
+- macOS: `~/Library/Application Support/docker-buildx-defaults/config`;
+- Windows: `%AppData%\docker-buildx-defaults\config`.
+
+Unlike a shell profile, it reaches every `docker compose`, also those
+started by an IDE or another app.
+
+`docker buildx docker-buildx-defaults` prints each setting, where it comes
+from, the real `docker-buildx`, and what the cache sees of the current
+directory's checkout:
+
+```
+docker-buildx-defaults v0.2.0
+Config file: /home/me/.config/docker-buildx-defaults/config
+DOCKER_BUILDX_DEFAULTS_COMPRESSION=zstd (default)
+DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci (/home/me/.config/docker-buildx-defaults/config)
+DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev (/home/me/.config/docker-buildx-defaults/config)
+DOCKER_BUILDX_DEFAULTS_BRANCH= (default)
+DOCKER_BUILDX_DEFAULTS_BUILDX= (default)
+Real docker-buildx: /usr/libexec/docker/cli-plugins/docker-buildx
+Here: acme/shop, branch "feature/x", default branch "main"
+```
 
 The default branch is the one `origin/HEAD` points to; `main` when the clone
 didn't record it (`git remote set-head origin --auto` records it), as in CI's
@@ -195,13 +272,13 @@ shallow checkouts.
 
 - A location is as trustworthy as whoever can write it: e.g. a CI-only one
   as the jobs that can push there with the CI user's login.
-- Only Compose's builds get the cache: not `docker buildx build` (e.g.
+- Only Compose's builds get the defaults: not `docker buildx build` (e.g.
   `docker/build-push-action`), nor bake files of a project's own.
 - Secrets passed with `ARG`, or copied in and deleted in a later step, end up
   in the shared cache; `RUN --mount=type=secret` doesn't.
 - The wrapper relies on how Compose calls buildx, which isn't documented
   (tested with Compose 5.6.0 and buildx 0.38.0). If that changes, the wrapper
-  finds nothing to add and builds go on without the cache.
+  finds nothing to add and builds go on without its defaults.
 - Docker Desktop may put its own `docker-buildx` back in
   `~/.docker/cli-plugins` (e.g. on an update): `docker buildx version` then
   stops going through the wrapper; install it again.
@@ -216,6 +293,8 @@ shallow checkouts.
   the machine (a remote `DOCKER_HOST`): that costs cache hits, not
   correctness, as BuildKit's cache keys include the platform; setting
   `DOCKER_DEFAULT_PLATFORM` fixes it.
+- An invalid config file or setting fails every `docker buildx` command,
+  with the reason.
 
 ## Development
 
@@ -224,5 +303,5 @@ go vet ./... && go test ./...
 ./build.sh dev   # every release binary, in dist/
 ```
 
-A release is a tag: `git tag v0.1.0 && git push origin v0.1.0` runs
+A release is a tag: `git tag v0.2.0 && git push origin v0.2.0` runs
 `.github/workflows/release.yml`.

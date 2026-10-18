@@ -1,11 +1,13 @@
-// A docker-buildx that wraps the real one, to add the shared layer cache to
-// the builds of Docker Compose (see README.md). Compose builds by running
-// `docker-buildx bake --file -` with the build definition on stdin: the
-// wrapper adds a cache-from and cache-to to each target that comes from a
+// A docker-buildx that wraps the real one, to give the builds of Docker
+// Compose the defaults Compose has no global setting for (see README.md):
+// zstd compression, and a layer cache shared through a registry. Compose builds
+// by running `docker-buildx bake --file -` with the build definition on
+// stdin: the wrapper adds its settings to each target that comes from a
 // Compose service, and passes everything else through unchanged.
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -19,6 +21,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,23 +31,48 @@ import (
 var version = "dev"
 
 const (
+	name = "docker-buildx-defaults"
 	// Answered by the wrapper itself: the install scripts use it to tell the
 	// wrapper from the real docker-buildx
-	versionArg = "docker-buildx-defaults-version"
+	versionArg = name + "-version"
+	// `docker buildx docker-buildx-defaults`: the settings in effect, and
+	// where each comes from
+	settingsArg = name
 	// Where the install scripts move a real docker-buildx found in the user's
 	// plugin directory, under the Docker config directory; not in
 	// cli-plugins, where the docker CLI would list it as an invalid plugin
-	realDir = "docker-buildx-defaults"
+	realDir = name
+	// Of the environment variables; the config file has the same names
+	envPrefix = "DOCKER_BUILDX_DEFAULTS_"
 )
+
+// The settings, without envPrefix, with their defaults; an empty value is the
+// default. The branch is the build's, not the user's: not in the config file.
+var settingDefs = []struct {
+	name, def string
+	inFile    bool
+}{
+	{"COMPRESSION", "zstd", true},
+	{"CACHE_FROM", "", true},
+	{"CACHE_TO", "", true},
+	{"BRANCH", "", false},
+	{"BUILDX", "", true},
+}
 
 func main() {
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == versionArg {
-		fmt.Println("docker-buildx-defaults", version)
+		fmt.Println(name, version)
 		return
 	}
-	buildx, err := findBuildx()
-	if err != nil {
+	s, err := loadSettings(configFile())
+	// The docker CLI asks every plugin for its metadata first, and takes one
+	// that fails it for a missing plugin, without its error: pass it through
+	// (to a real docker-buildx found without the settings), so that the
+	// command itself fails, with the reason
+	if err != nil && len(args) == 1 && args[0] == "docker-cli-plugin-metadata" {
+		s = settings{values: map[string]setting{}}
+	} else if err != nil {
 		fail(err)
 	}
 	// The docker CLI runs a plugin as `docker-buildx buildx <command>`,
@@ -53,6 +81,14 @@ func main() {
 	if len(cmd) > 0 && cmd[0] == "buildx" {
 		cmd = cmd[1:]
 	}
+	buildx, buildxErr := findBuildx(s)
+	if len(cmd) == 1 && cmd[0] == settingsArg {
+		printSettings(s, buildx, buildxErr)
+		return
+	}
+	if buildxErr != nil {
+		fail(buildxErr)
+	}
 	if len(cmd) == 0 || cmd[0] != "bake" || !readsStdin(cmd[1:]) {
 		os.Exit(run(buildx, args, os.Stdin))
 	}
@@ -60,16 +96,136 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("reading the bake definition: %w", err))
 	}
-	os.Exit(run(buildx, append(args, cacheSets(def)...), bytes.NewReader(def)))
+	os.Exit(run(buildx, append(args, defaultSets(def, s)...), bytes.NewReader(def)))
 }
 
 func fail(err error) {
-	fmt.Fprintln(os.Stderr, "docker-buildx-defaults:", err)
+	fmt.Fprintln(os.Stderr, name+":", err)
 	os.Exit(1)
 }
 
 func warn(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "docker-buildx-defaults: "+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, name+": "+format+"\n", a...)
+}
+
+type setting struct {
+	value  string
+	source string // "environment", the config file's path, or "default"
+}
+
+type settings struct {
+	file   string             // the config file, "" when there's no config directory
+	values map[string]setting // by name, without envPrefix
+}
+
+func (s settings) get(name string) string { return s.values[name].value }
+
+// configFile is the user's config file, e.g.
+// ~/.config/docker-buildx-defaults/config on Linux; "" when there's no
+// config directory (no HOME, as for some services)
+func configFile() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, name, "config")
+}
+
+// loadSettings reads each setting from the environment (when set, even
+// empty), else from the config file (when it has it), else its default
+func loadSettings(file string) (settings, error) {
+	s := settings{file: file, values: map[string]setting{}}
+	inFile := map[string]string{}
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return s, err
+		}
+		if inFile, err = parseConfig(b, file); err != nil {
+			return s, err
+		}
+	}
+	for _, d := range settingDefs {
+		v := setting{d.def, "default"}
+		if fv, ok := inFile[d.name]; ok && fv != "" {
+			v = setting{fv, file}
+		}
+		if ev, ok := os.LookupEnv(envPrefix + d.name); ok {
+			v = setting{ev, "environment"}
+			if ev == "" {
+				v.value = d.def
+			}
+		}
+		s.values[d.name] = v
+	}
+	if c := s.values["COMPRESSION"]; c.value != "gzip" && c.value != "zstd" {
+		return s, fmt.Errorf("%sCOMPRESSION (%s): %q, not gzip or zstd", envPrefix, c.source, c.value)
+	}
+	return s, nil
+}
+
+// parseConfig reads KEY=VALUE lines, with the names of the environment
+// variables; blank lines and lines starting with # are skipped
+func parseConfig(b []byte, file string) (map[string]string, error) {
+	values := map[string]string{}
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")) // as some Windows editors write it
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for n := 1; sc.Scan(); n++ {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s:%d: not KEY=VALUE", file, n)
+		}
+		key = strings.TrimSpace(key)
+		known := false
+		for _, d := range settingDefs {
+			if key == envPrefix+d.name {
+				if !d.inFile {
+					return nil, fmt.Errorf("%s:%d: %s is only read from the environment", file, n, key)
+				}
+				known = true
+			}
+		}
+		if !known {
+			return nil, fmt.Errorf("%s:%d: unknown setting %s", file, n, key)
+		}
+		short := strings.TrimPrefix(key, envPrefix)
+		if _, dup := values[short]; dup {
+			return nil, fmt.Errorf("%s:%d: %s set twice", file, n, key)
+		}
+		values[short] = strings.TrimSpace(value)
+	}
+	return values, sc.Err()
+}
+
+func printSettings(s settings, buildx string, buildxErr error) {
+	fmt.Println(name, version)
+	file := s.file
+	if file == "" {
+		file = "none (no config directory)"
+	} else if _, err := os.Stat(file); errors.Is(err, os.ErrNotExist) {
+		file += " (not there)"
+	}
+	fmt.Println("Config file:", file)
+	for _, d := range settingDefs {
+		v := s.values[d.name]
+		fmt.Printf("%s%s=%s (%s)\n", envPrefix, d.name, v.value, v.source)
+	}
+	if buildxErr != nil {
+		fmt.Println("Real docker-buildx:", buildxErr)
+	} else {
+		fmt.Println("Real docker-buildx:", buildx)
+	}
+	if dir, err := os.Getwd(); err == nil {
+		if c := inspect(dir, s); c.repo != "" {
+			fmt.Printf("Here: %s, branch %q, default branch %q\n", c.repo, c.branch, c.defaultBranch)
+		} else {
+			fmt.Println("Here: not a git checkout with an origin remote (no cache)")
+		}
+	}
 }
 
 // readsStdin tells whether bake reads its definition from stdin (--file -)
@@ -85,24 +241,23 @@ func readsStdin(args []string) bool {
 	return false
 }
 
-// cacheSets returns the --set arguments that add the cache to the targets of
-// the bake definition that come from a Compose service
-func cacheSets(def []byte) []string {
-	from, to := locations()
-	if len(from) == 0 && to == "" {
-		return nil
-	}
+type target struct {
+	Context   string            `json:"context"`
+	Labels    map[string]string `json:"labels"`
+	Platforms []string          `json:"platforms"`
+	Output    []any             `json:"output"`
+}
+
+// defaultSets returns the --set arguments that add the settings to the
+// targets of the bake definition that come from a Compose service
+func defaultSets(def []byte, s settings) []string {
 	var d struct {
-		Target map[string]struct {
-			Context   string            `json:"context"`
-			Labels    map[string]string `json:"labels"`
-			Platforms []string          `json:"platforms"`
-		} `json:"target"`
+		Target map[string]target `json:"target"`
 	}
 	if err := json.Unmarshal(def, &d); err != nil {
 		// Not the JSON Compose writes (its format changed?): build without
-		// the cache rather than not at all
-		warn("not a bake definition from Compose, building without the cache: %v", err)
+		// the defaults rather than not at all
+		warn("not a bake definition from Compose, building without the defaults: %v", err)
 		return nil
 	}
 	names := make([]string, 0, len(d.Target))
@@ -111,10 +266,64 @@ func cacheSets(def []byte) []string {
 			names = append(names, name)
 		}
 	}
-	if len(names) == 0 {
+	sort.Strings(names)
+	var sets []string
+	if s.get("COMPRESSION") == "zstd" {
+		for _, name := range names {
+			sets = append(sets, outputSets(name, d.Target[name].Output)...)
+		}
+	}
+	return append(sets, cacheSets(names, d.Target, s)...)
+}
+
+// outputSets compresses with zstd the outputs that load the image into the
+// local image store, as Compose's are: type=docker, or type=image without
+// push. Pushed images are left alone: who pulls them may not read zstd.
+func outputSets(name string, outputs []any) []string {
+	values := make([]string, len(outputs))
+	changed := false
+	for i, o := range outputs {
+		s, ok := o.(string)
+		if !ok {
+			warn("%s: an output that isn't a string, left as it is: %v", name, o)
+			return nil
+		}
+		values[i] = s
+		if loadsLocally(s) {
+			values[i] += ",compression=zstd"
+			changed = true
+		}
+	}
+	if !changed {
 		return nil
 	}
-	sort.Strings(names)
+	// The first replaces the target's outputs, the others add to them
+	sets := []string{"--set", name + ".output=" + values[0]}
+	for _, v := range values[1:] {
+		sets = append(sets, "--set", name+".output+="+v)
+	}
+	return sets
+}
+
+func loadsLocally(output string) bool {
+	attrs := map[string]string{}
+	for _, f := range strings.Split(output, ",") {
+		k, v, _ := strings.Cut(f, "=")
+		attrs[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	if _, set := attrs["compression"]; set {
+		return false // the project's own choice
+	}
+	push, _ := strconv.ParseBool(attrs["push"])
+	return attrs["type"] == "docker" || (attrs["type"] == "image" && !push)
+}
+
+// cacheSets returns the --set arguments that add the cache to the targets
+func cacheSets(names []string, targets map[string]target, s settings) []string {
+	from, to := locations(s)
+	if len(names) == 0 || (len(from) == 0 && to == "") {
+		return nil
+	}
 	// Where a registry can't be reached (or when it's down) every import and
 	// export there would fail, each with an ERROR line in the build output,
 	// and each after a timeout: check each registry once, and say so once
@@ -141,13 +350,19 @@ func cacheSets(def []byte) []string {
 	if to != "" && !usable(to) {
 		to = ""
 	}
+	// Without force-compression: only the layers that aren't compressed yet
+	// (those built here) are, the others are uploaded as they are
+	toAttrs := ",mode=max,ignore-error=true,image-manifest=true,oci-mediatypes=true"
+	if s.get("COMPRESSION") == "zstd" {
+		toAttrs += ",compression=zstd"
+	}
 	var sets []string
 	repos := map[string]checkout{}
 	for _, name := range names {
-		t := d.Target[name]
+		t := targets[name]
 		c, ok := repos[t.Context]
 		if !ok {
-			c = inspect(t.Context)
+			c = inspect(t.Context, s)
 			repos[t.Context] = c
 		}
 		if c.repo == "" {
@@ -180,24 +395,24 @@ func cacheSets(def []byte) []string {
 			// image-manifest: a plain OCI image manifest, the default of
 			// recent BuildKit, for older ones too (instead of an index that
 			// lists layers), so every cache in the registry has the same shape
-			sets = append(sets, "--set", name+".cache-to+=type=registry,ref="+ref(to, c.branch)+",mode=max,ignore-error=true,image-manifest=true,oci-mediatypes=true")
+			sets = append(sets, "--set", name+".cache-to+=type=registry,ref="+ref(to, c.branch)+toAttrs)
 		}
 	}
 	return sets
 }
 
-// locations are where the cache is imported from (DOCKER_BUILDX_DEFAULTS_CACHE_FROM,
-// comma-separated, in order) and exported to (DOCKER_BUILDX_DEFAULTS_CACHE_TO, none
-// if empty): each a registry with an optional path, host[:port][/path], e.g.
+// locations are where the cache is imported from (CACHE_FROM,
+// comma-separated, in order) and exported to (CACHE_TO, none if empty): each
+// a registry with an optional path, host[:port][/path], e.g.
 // registry.example/dev. Who reads and writes where is up to the registry's
 // access control (see README.md).
-func locations() (from []string, to string) {
-	for _, l := range strings.Split(os.Getenv("DOCKER_BUILDX_DEFAULTS_CACHE_FROM"), ",") {
+func locations(s settings) (from []string, to string) {
+	for _, l := range strings.Split(s.get("CACHE_FROM"), ",") {
 		if l = location(l); l != "" {
 			from = append(from, l)
 		}
 	}
-	return from, location(os.Getenv("DOCKER_BUILDX_DEFAULTS_CACHE_TO"))
+	return from, location(s.get("CACHE_TO"))
 }
 
 func location(s string) string {
@@ -250,7 +465,7 @@ type checkout struct {
 	defaultBranch string
 }
 
-func inspect(dir string) checkout {
+func inspect(dir string, s settings) checkout {
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		return checkout{} // a remote context (a URL), not a local checkout
 	}
@@ -267,15 +482,15 @@ func inspect(dir string) checkout {
 	if head, ok := git(dir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); ok {
 		c.defaultBranch = strings.TrimPrefix(head, "origin/")
 	}
-	c.branch = branch(dir, c.defaultBranch)
+	c.branch = branch(dir, c.defaultBranch, s.get("BRANCH"))
 	return c
 }
 
 // branch is the branch being built, "" if unknown. CI checks out a commit
-// (detached HEAD): TeamCity's builds name the branch in DOCKER_BUILDX_DEFAULTS_BRANCH
+// (detached HEAD): TeamCity's builds name the branch in the BRANCH setting
 // (see README.md), GitHub's jobs in their own variables.
-func branch(dir, defaultBranch string) string {
-	b := os.Getenv("DOCKER_BUILDX_DEFAULTS_BRANCH")
+func branch(dir, defaultBranch, setting string) string {
+	b := setting
 	if b == "" {
 		b, _ = git(dir, "symbolic-ref", "--quiet", "--short", "HEAD")
 	}
@@ -341,17 +556,17 @@ func tag(branch string) string {
 	return t
 }
 
-// findBuildx finds the real docker-buildx: the one an install script moved aside,
-// or the first one where the docker CLI looks for plugins, after the user's
-// directory (where the wrapper is)
-func findBuildx() (string, error) {
-	name := "docker-buildx"
+// findBuildx finds the real docker-buildx: the BUILDX setting, the one an
+// install script moved aside, or the first one where the docker CLI looks for
+// plugins, after the user's directory (where the wrapper is)
+func findBuildx(s settings) (string, error) {
+	exe := "docker-buildx"
 	if runtime.GOOS == "windows" {
-		name += ".exe"
+		exe += ".exe"
 	}
-	if p := os.Getenv("DOCKER_BUILDX_DEFAULTS_BUILDX"); p != "" {
+	if p := s.get("BUILDX"); p != "" {
 		if _, err := os.Stat(p); err != nil {
-			return "", fmt.Errorf("DOCKER_BUILDX_DEFAULTS_BUILDX: %w", err)
+			return "", fmt.Errorf("%sBUILDX (%s): %w", envPrefix, s.values["BUILDX"].source, err)
 		}
 		return p, nil
 	}
@@ -377,7 +592,7 @@ func findBuildx() (string, error) {
 	dirs := append([]string{filepath.Join(config, realDir)}, extra...)
 	dirs = append(dirs, systemPluginDirs()...)
 	for _, dir := range dirs {
-		p := filepath.Join(dir, name)
+		p := filepath.Join(dir, exe)
 		resolved, err := filepath.EvalSymlinks(p)
 		if err != nil {
 			continue // not there
@@ -386,7 +601,7 @@ func findBuildx() (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("no docker-buildx found besides this wrapper (in %s); set DOCKER_BUILDX_DEFAULTS_BUILDX to its path", strings.Join(dirs, ", "))
+	return "", fmt.Errorf("no docker-buildx found besides this wrapper (in %s); set %sBUILDX to its path", strings.Join(dirs, ", "), envPrefix)
 }
 
 // extraPluginDirs reads cliPluginsExtraDirs from the docker CLI config, which
