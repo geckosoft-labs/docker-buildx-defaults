@@ -336,5 +336,7 @@ go vet ./... && go test ./...
 ./build.sh dev   # every release binary, in dist/
 ```
 
-A release is a tag: `git tag v0.2.0 && git push origin v0.2.0` runs
+A release is a tag: first move the changes under "Unreleased" in
+[CHANGELOG.md](CHANGELOG.md) to a section of the new version, then
+`git tag v0.3.0 && git push origin v0.3.0` runs
 `.github/workflows/release.yml`.
