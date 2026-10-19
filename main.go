@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,7 +56,9 @@ var settingDefs = []struct {
 	inFile    bool
 }{
 	{"COMPRESSION", "zstd", true},
+	{"FORCE_COMPRESSION", "omit", true},
 	{"PUSH_COMPRESSION", "gzip", true},
+	{"PUSH_FORCE_COMPRESSION", "omit", true},
 	{"CACHE_FROM", "", true},
 	{"CACHE_TO", "", true},
 	{"BRANCH", "", false},
@@ -164,9 +167,20 @@ func loadSettings(file string) (settings, error) {
 		}
 		s.values[d.name] = v
 	}
-	for _, n := range []string{"COMPRESSION", "PUSH_COMPRESSION"} {
-		if c := s.values[n]; c.value != "gzip" && c.value != "zstd" {
-			return s, fmt.Errorf("%s%s (%s): %q, not gzip or zstd", envPrefix, n, c.source, c.value)
+	compression, force := []string{"gzip", "zstd"}, []string{"true", "false", "omit"}
+	for _, c := range []struct {
+		name    string
+		allowed []string
+	}{
+		{"COMPRESSION", compression},
+		{"FORCE_COMPRESSION", force},
+		{"PUSH_COMPRESSION", compression},
+		{"PUSH_FORCE_COMPRESSION", force},
+	} {
+		if v := s.values[c.name]; !slices.Contains(c.allowed, v.value) {
+			n := len(c.allowed)
+			return s, fmt.Errorf("%s%s (%s): %q, not %s or %s", envPrefix, c.name, v.source, v.value,
+				strings.Join(c.allowed[:n-1], ", "), c.allowed[n-1])
 		}
 	}
 	return s, nil
@@ -286,7 +300,7 @@ func defaultSets(def []byte, s settings) []string {
 // of the project's own files (not Compose's): its definition is the one bake
 // resolves with the same arguments, asked with --print
 func fileSets(buildx string, args, bakeArgs []string, s settings) []string {
-	if s.get("COMPRESSION") != "zstd" && s.get("PUSH_COMPRESSION") != "zstd" || !builds(bakeArgs) {
+	if compressionAttrs(s, "") == "" && compressionAttrs(s, "PUSH_") == "" || !builds(bakeArgs) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
@@ -353,8 +367,8 @@ func outputSets(name string, outputs []any, s settings) []string {
 			warn("%s: an output that is neither a string nor an object, left as it is: %v", name, o)
 			return nil
 		}
-		if compresses(attrs, s) {
-			values[i] += ",compression=zstd"
+		if add := outputAttrs(attrs, s); add != "" {
+			values[i] += add
 			changed = true
 		}
 	}
@@ -370,18 +384,37 @@ func outputSets(name string, outputs []any, s settings) []string {
 	return sets
 }
 
-func compresses(attrs map[string]string, s settings) bool {
-	if _, set := attrs["compression"]; set {
-		return false // the project's own choice
+// outputAttrs are the attributes to add to an output: those of
+// compressionAttrs, of the local or the pushed images
+func outputAttrs(attrs map[string]string, s settings) string {
+	for _, a := range []string{"compression", "force-compression"} {
+		if _, set := attrs[a]; set {
+			return "" // the project's own choice
+		}
 	}
 	push, _ := strconv.ParseBool(attrs["push"])
 	switch t := attrs["type"]; {
 	case t == "docker" || t == "image" && !push:
-		return s.get("COMPRESSION") == "zstd"
+		return compressionAttrs(s, "")
 	case t == "registry" || t == "image" && push:
-		return s.get("PUSH_COMPRESSION") == "zstd"
+		return compressionAttrs(s, "PUSH_")
 	}
-	return false
+	return ""
+}
+
+// compressionAttrs are the attributes of the [PUSH_]COMPRESSION and
+// [PUSH_]FORCE_COMPRESSION settings: nothing for gzip, BuildKit's default,
+// unless forcing (or not) is set, which needs the compression too
+func compressionAttrs(s settings, prefix string) string {
+	c, force := s.get(prefix+"COMPRESSION"), s.get(prefix+"FORCE_COMPRESSION")
+	if c == "gzip" && force == "omit" {
+		return ""
+	}
+	attrs := ",compression=" + c
+	if force != "omit" {
+		attrs += ",force-compression=" + force
+	}
+	return attrs
 }
 
 // parseAttrs reads an output's key=value fields, comma-separated, as CSV
@@ -455,12 +488,9 @@ func cacheSets(names []string, targets map[string]target, s settings) []string {
 	if to != "" && !usable(to) {
 		to = ""
 	}
-	// Without force-compression: only the layers that aren't compressed yet
+	// Without force-compression, only the layers that aren't compressed yet
 	// (those built here) are, the others are uploaded as they are
-	toAttrs := ",mode=max,ignore-error=true,image-manifest=true,oci-mediatypes=true"
-	if s.get("COMPRESSION") == "zstd" {
-		toAttrs += ",compression=zstd"
-	}
+	toAttrs := ",mode=max,ignore-error=true,image-manifest=true,oci-mediatypes=true" + compressionAttrs(s, "")
 	var sets []string
 	repos := map[string]checkout{}
 	for _, name := range names {

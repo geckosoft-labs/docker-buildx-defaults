@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -112,7 +113,8 @@ func TestLoadSettings(t *testing.T) {
 		"\r\n"+
 		"DOCKER_BUILDX_DEFAULTS_CACHE_TO=reg/dev\r\n"+
 		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=gzip\r\n"+
-		"DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=zstd\r\n")
+		"DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=zstd\r\n"+
+		"DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION=true\r\n")
 	for _, d := range settingDefs {
 		unsetenv(t, envPrefix+d.name)
 	}
@@ -123,12 +125,14 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]setting{
-		"CACHE_FROM":       {"reg/dev,reg/ci", file},
-		"CACHE_TO":         {"other/dev", "environment"},
-		"COMPRESSION":      {"zstd", "environment"},
-		"PUSH_COMPRESSION": {"zstd", file},
-		"BRANCH":           {"", "default"},
-		"BUILDX":           {"", "default"},
+		"CACHE_FROM":             {"reg/dev,reg/ci", file},
+		"CACHE_TO":               {"other/dev", "environment"},
+		"COMPRESSION":            {"zstd", "environment"},
+		"PUSH_COMPRESSION":       {"zstd", file},
+		"FORCE_COMPRESSION":      {"omit", "default"},
+		"PUSH_FORCE_COMPRESSION": {"true", file},
+		"BRANCH":                 {"", "default"},
+		"BUILDX":                 {"", "default"},
 	}
 	if !reflect.DeepEqual(s.values, want) {
 		t.Errorf("\n got %v\nwant %v", s.values, want)
@@ -150,6 +154,7 @@ func TestLoadSettingsRejects(t *testing.T) {
 	for content, want := range map[string]string{
 		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=lz4":       `"lz4", not gzip or zstd`,
 		"DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=none": `PUSH_COMPRESSION (`,
+		"DOCKER_BUILDX_DEFAULTS_FORCE_COMPRESSION=yes": `"yes", not true, false or omit`,
 		"DOCKER_BUILDX_DEFAULTS_CACHE_FORM=reg":        ":1: unknown setting DOCKER_BUILDX_DEFAULTS_CACHE_FORM",
 		"# x\nDOCKER_BUILDX_DEFAULTS_BRANCH=main":      ":2: DOCKER_BUILDX_DEFAULTS_BRANCH is only read from the environment",
 		"reg/dev": ":1: not KEY=VALUE",
@@ -467,5 +472,59 @@ func TestDefaultSetsCompressionOnly(t *testing.T) {
 	want := []string{"--set", "web.output=type=docker,compression=zstd"}
 	if got := defaultSets(definition(t.TempDir()), s); !reflect.DeepEqual(got, want) {
 		t.Errorf("\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestForceCompression(t *testing.T) {
+	for _, c := range []struct {
+		values      map[string]string
+		local, push string
+	}{
+		// The defaults: zstd locally, nothing (gzip) pushed, force omitted
+		{nil, ",compression=zstd", ""},
+		{map[string]string{"FORCE_COMPRESSION": "true"}, ",compression=zstd,force-compression=true", ""},
+		{map[string]string{"PUSH_COMPRESSION": "zstd", "PUSH_FORCE_COMPRESSION": "true"},
+			",compression=zstd", ",compression=zstd,force-compression=true"},
+		{map[string]string{"PUSH_COMPRESSION": "zstd", "PUSH_FORCE_COMPRESSION": "false"},
+			",compression=zstd", ",compression=zstd,force-compression=false"},
+		// Forcing (or not) gzip needs it named
+		{map[string]string{"COMPRESSION": "gzip", "FORCE_COMPRESSION": "true", "PUSH_FORCE_COMPRESSION": "false"},
+			",compression=gzip,force-compression=true", ",compression=gzip,force-compression=false"},
+		{map[string]string{"COMPRESSION": "gzip"}, "", ""},
+	} {
+		s := envSettings(t, c.values)
+		if got := compressionAttrs(s, ""); got != c.local {
+			t.Errorf("%v, local: %q, want %q", c.values, got, c.local)
+		}
+		if got := compressionAttrs(s, "PUSH_"); got != c.push {
+			t.Errorf("%v, pushed: %q, want %q", c.values, got, c.push)
+		}
+	}
+
+	s := envSettings(t, map[string]string{"FORCE_COMPRESSION": "true", "PUSH_COMPRESSION": "zstd", "PUSH_FORCE_COMPRESSION": "true"})
+	for _, c := range []struct {
+		outputs []any
+		want    []string
+	}{
+		{[]any{"type=docker"}, []string{"--set", "t.output=type=docker,compression=zstd,force-compression=true"}},
+		{[]any{map[string]any{"type": "image", "push": "true"}},
+			[]string{"--set", "t.output=type=image,push=true,compression=zstd,force-compression=true"}},
+		// The project's own choice, either attribute
+		{[]any{"type=registry,force-compression=false"}, nil},
+	} {
+		if got := outputSets("t", c.outputs, s); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%v:\n got %q\nwant %q", c.outputs, got, c.want)
+		}
+	}
+
+	// The cache export follows FORCE_COMPRESSION
+	dir := checkoutDir(t, "main")
+	clearCI(t)
+	reg := registry(t)
+	s = envSettings(t, map[string]string{"CACHE_TO": reg, "FORCE_COMPRESSION": "true"})
+	want := "web.cache-to+=type=registry,ref=" + reg + "/org/app/web/linux-amd64:main" +
+		",mode=max,ignore-error=true,image-manifest=true,oci-mediatypes=true,compression=zstd,force-compression=true"
+	if got := defaultSets(definition(dir), s); !slices.Contains(got, want) {
+		t.Errorf("cache export:\n got %q\nwant %q among them", got, want)
 	}
 }

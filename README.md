@@ -52,13 +52,20 @@ A project's own `compression=` is left alone.
 
 Layers that are already compressed (pulled base images, layers imported from
 the cache, layers the builder compressed with gzip for an earlier build) are
-kept as they are; only the ones compressed for this build use zstd. Exporting
+kept as they are; only the ones compressed for this build use zstd.
+`DOCKER_BUILDX_DEFAULTS_FORCE_COMPRESSION=true` (local images and the cache)
+and `DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION=true` (pushed images)
+recompress them all (`force-compression=true`), base images too: every
+build then pays for it, which is worth it for images pulled more often than
+they're built, e.g. those deployed from CI. `false` passes
+`force-compression=false`; `omit`, the default, passes nothing. Exporting
 the images is the slowest step of many builds once the cache has the rest:
 in a stack with a 5 GB image, zstd cut it from 100 s to 45 s, and its layers
 came out 4% smaller.
 
 zstd layers come with OCI media types, which BuildKit then uses for the
-image. `gzip` leaves the outputs, and the cache, to BuildKit.
+image. `gzip` (with forcing omitted) leaves the outputs, and the cache, to
+BuildKit.
 
 ### Cache
 
@@ -181,8 +188,9 @@ On runners and build agents, install the release binary as
 `/usr/local/lib/docker/cli-plugins/docker-buildx` (Linux), which the docker
 CLI searches before the package's `/usr/libexec/docker/cli-plugins`. In the
 config file of the user the jobs run as (or in their environment), set
-`DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=zstd` if what pulls the images reads
-zstd, and the cache's `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` and
+`DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=zstd` (and
+`DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION=true`) if what pulls the
+images reads zstd, and the cache's `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` and
 `DOCKER_BUILDX_DEFAULTS_CACHE_TO`, with the docker login of the registry's
 CI user.
 
@@ -248,7 +256,9 @@ empty value is the default.
 | Setting | Default | |
 |---|---|---|
 | `DOCKER_BUILDX_DEFAULTS_COMPRESSION` | `zstd` | Of the images loaded locally, and of the cache: `zstd` or `gzip` (see [Compression](#compression)) |
+| `DOCKER_BUILDX_DEFAULTS_FORCE_COMPRESSION` | `omit` | Recompress the layers already compressed otherwise, for the images loaded locally and the cache: `true`, `false` or `omit` |
 | `DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION` | `gzip` | Of the images pushed: `zstd` or `gzip` |
+| `DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION` | `omit` | The same, for the images pushed |
 | `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | none | The locations to import the cache from, comma-separated, in order (see [Cache](#cache)) |
 | `DOCKER_BUILDX_DEFAULTS_CACHE_TO` | none | The location to export the cache to |
 | `DOCKER_BUILDX_DEFAULTS_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)); environment only |
@@ -274,7 +284,9 @@ directory's checkout:
 docker-buildx-defaults v0.2.0
 Config file: /home/me/.config/docker-buildx-defaults/config
 DOCKER_BUILDX_DEFAULTS_COMPRESSION=zstd (default)
+DOCKER_BUILDX_DEFAULTS_FORCE_COMPRESSION=omit (default)
 DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=gzip (default)
+DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION=omit (default)
 DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci (/home/me/.config/docker-buildx-defaults/config)
 DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev (/home/me/.config/docker-buildx-defaults/config)
 DOCKER_BUILDX_DEFAULTS_BRANCH= (default)
