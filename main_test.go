@@ -111,7 +111,8 @@ func TestLoadSettings(t *testing.T) {
 		"DOCKER_BUILDX_DEFAULTS_CACHE_FROM = reg/dev,reg/ci\r\n"+
 		"\r\n"+
 		"DOCKER_BUILDX_DEFAULTS_CACHE_TO=reg/dev\r\n"+
-		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=gzip\r\n")
+		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=gzip\r\n"+
+		"DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=zstd\r\n")
 	for _, d := range settingDefs {
 		unsetenv(t, envPrefix+d.name)
 	}
@@ -122,11 +123,12 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]setting{
-		"CACHE_FROM":  {"reg/dev,reg/ci", file},
-		"CACHE_TO":    {"other/dev", "environment"},
-		"COMPRESSION": {"zstd", "environment"},
-		"BRANCH":      {"", "default"},
-		"BUILDX":      {"", "default"},
+		"CACHE_FROM":       {"reg/dev,reg/ci", file},
+		"CACHE_TO":         {"other/dev", "environment"},
+		"COMPRESSION":      {"zstd", "environment"},
+		"PUSH_COMPRESSION": {"zstd", file},
+		"BRANCH":           {"", "default"},
+		"BUILDX":           {"", "default"},
 	}
 	if !reflect.DeepEqual(s.values, want) {
 		t.Errorf("\n got %v\nwant %v", s.values, want)
@@ -146,9 +148,10 @@ func TestLoadSettingsRejects(t *testing.T) {
 		unsetenv(t, envPrefix+d.name)
 	}
 	for content, want := range map[string]string{
-		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=lz4":  `"lz4", not gzip or zstd`,
-		"DOCKER_BUILDX_DEFAULTS_CACHE_FORM=reg":   ":1: unknown setting DOCKER_BUILDX_DEFAULTS_CACHE_FORM",
-		"# x\nDOCKER_BUILDX_DEFAULTS_BRANCH=main": ":2: DOCKER_BUILDX_DEFAULTS_BRANCH is only read from the environment",
+		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=lz4":       `"lz4", not gzip or zstd`,
+		"DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=none": `PUSH_COMPRESSION (`,
+		"DOCKER_BUILDX_DEFAULTS_CACHE_FORM=reg":        ":1: unknown setting DOCKER_BUILDX_DEFAULTS_CACHE_FORM",
+		"# x\nDOCKER_BUILDX_DEFAULTS_BRANCH=main":      ":2: DOCKER_BUILDX_DEFAULTS_BRANCH is only read from the environment",
 		"reg/dev": ":1: not KEY=VALUE",
 		"DOCKER_BUILDX_DEFAULTS_CACHE_TO=a\nDOCKER_BUILDX_DEFAULTS_CACHE_TO=b": ":2: DOCKER_BUILDX_DEFAULTS_CACHE_TO set twice",
 	} {
@@ -348,27 +351,113 @@ func TestDefaultSetsCacheAddsNothing(t *testing.T) {
 }
 
 func TestOutputSets(t *testing.T) {
+	local := envSettings(t, nil) // the defaults: zstd locally, gzip pushed
+	both := envSettings(t, map[string]string{"PUSH_COMPRESSION": "zstd"})
+	push := envSettings(t, map[string]string{"COMPRESSION": "gzip", "PUSH_COMPRESSION": "zstd"})
 	for _, c := range []struct {
+		s       settings
 		outputs []any
 		want    []string
 	}{
-		{[]any{"type=docker"}, []string{"--set", "t.output=type=docker,compression=zstd"}},
-		{[]any{"type=image,name=x/a"}, []string{"--set", "t.output=type=image,name=x/a,compression=zstd"}},
-		{[]any{"type=docker", "type=local,dest=out"}, []string{
+		{local, []any{"type=docker"}, []string{"--set", "t.output=type=docker,compression=zstd"}},
+		{local, []any{"type=image,name=x/a"}, []string{"--set", "t.output=type=image,name=x/a,compression=zstd"}},
+		{local, []any{"type=docker", "type=local,dest=out"}, []string{
 			"--set", "t.output=type=docker,compression=zstd",
 			"--set", "t.output+=type=local,dest=out",
 		}},
-		// Pushed: left alone
-		{[]any{"type=registry"}, nil},
-		{[]any{"type=image,push=true"}, nil},
+		// Pushed: only with PUSH_COMPRESSION
+		{local, []any{"type=registry"}, nil},
+		{local, []any{"type=image,push=true"}, nil},
+		{both, []any{"type=registry"}, []string{"--set", "t.output=type=registry,compression=zstd"}},
+		{push, []any{"type=image,push=true"}, []string{"--set", "t.output=type=image,push=true,compression=zstd"}},
+		{push, []any{"type=docker"}, nil},
+		// As bake --print has them, quoted where needed
+		{both, []any{map[string]any{"type": "image", "push": "true", "name": "x/a:1,x/a:latest"}},
+			[]string{"--set", `t.output=type=image,"name=x/a:1,x/a:latest",push=true,compression=zstd`}},
+		{local, []any{map[string]any{"type": "docker"}}, []string{"--set", "t.output=type=docker,compression=zstd"}},
 		// The project's own compression
-		{[]any{"type=docker,compression=gzip"}, nil},
-		{[]any{map[string]any{"type": "docker"}}, nil},
-		{nil, nil},
+		{both, []any{"type=docker,compression=gzip"}, nil},
+		{both, []any{map[string]any{"type": "registry", "compression": "gzip"}}, nil},
+		{both, []any{`"type=image,push=true",compression=gzip`}, nil},
+		{both, []any{42}, nil},
+		{both, nil, nil},
 	} {
-		if got := outputSets("t", c.outputs); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%v:\n got %q\nwant %q", c.outputs, got, c.want)
+		if got := outputSets("t", c.outputs, c.s); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%v %v:\n got %q\nwant %q", c.s.values, c.outputs, got, c.want)
 		}
+	}
+}
+
+func TestBuilds(t *testing.T) {
+	for args, want := range map[string]bool{
+		"":                       true,
+		"--push app":             true,
+		"-f compose.yaml --load": true,
+		"--print":                false,
+		"--list targets":         false,
+		"--list=variables":       false,
+		"--call check":           false,
+		"--check app":            false,
+		"--progress plain -h":    false,
+	} {
+		if got := builds(strings.Fields(args)); got != want {
+			t.Errorf("builds(%q) = %v, want %v", args, got, want)
+		}
+	}
+}
+
+// fakeBuildx is a docker-buildx that answers bake --print with def, and
+// records its arguments in args.txt next to it
+func fakeBuildx(t *testing.T, def string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake buildx is a shell script")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "def.json"), []byte(def), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\necho \"$@\" > " + dir + "/args.txt\ncat " + dir + "/def.json\n"
+	p := filepath.Join(dir, "docker-buildx")
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestFileSets(t *testing.T) {
+	buildx := fakeBuildx(t, `{"group": {"default": {"targets": ["api", "web"]}}, "target": {
+		"web": {"context": ".", "output": [{"type": "image", "push": "true"}]},
+		"api": {"context": ".", "output": [{"type": "docker"}]}
+	}}`)
+	s := envSettings(t, map[string]string{"PUSH_COMPRESSION": "zstd"})
+	want := []string{
+		"--set", "api.output=type=docker,compression=zstd",
+		"--set", "web.output=type=image,push=true,compression=zstd",
+	}
+	if got := fileSets(buildx, []string{"buildx", "bake", "--push"}, []string{"--push"}, s); !reflect.DeepEqual(got, want) {
+		t.Errorf("\n got %q\nwant %q", got, want)
+	}
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(buildx), "args.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(b)); got != "buildx bake --push --print" {
+		t.Errorf("bake --print run as %q", got)
+	}
+
+	// Nothing to compress: bake --print isn't asked
+	gzip := envSettings(t, map[string]string{"COMPRESSION": "gzip"})
+	if got := fileSets("/nonexistent", nil, []string{"--push"}, gzip); got != nil {
+		t.Errorf("gzip: %q", got)
+	}
+	// Not a build
+	if got := fileSets("/nonexistent", nil, []string{"--print"}, s); got != nil {
+		t.Errorf("--print: %q", got)
+	}
+	// bake --print fails: building without the defaults
+	if got := fileSets(filepath.Join(t.TempDir(), "missing"), nil, nil, s); got != nil {
+		t.Errorf("failing bake --print: %q", got)
 	}
 }
 

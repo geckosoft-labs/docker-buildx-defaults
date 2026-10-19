@@ -1,14 +1,16 @@
-// A docker-buildx that wraps the real one, to give the builds of Docker
-// Compose the defaults Compose has no global setting for (see README.md):
-// zstd compression, and a layer cache shared through a registry. Compose builds
-// by running `docker-buildx bake --file -` with the build definition on
-// stdin: the wrapper adds its settings to each target that comes from a
-// Compose service, and passes everything else through unchanged.
+// A docker-buildx that wraps the real one, to give bake builds the defaults
+// that buildx and Compose have no global setting for (see README.md): zstd
+// compression, of every bake's images, and a layer cache shared through a
+// registry, for Compose's. Compose builds by running `docker-buildx bake
+// --file -` with the build definition on stdin; other bakes get theirs from
+// `bake --print`. The wrapper adds its settings to the definition's targets
+// with --set, and passes everything else through unchanged.
 package main
 
 import (
 	"bufio"
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +55,7 @@ var settingDefs = []struct {
 	inFile    bool
 }{
 	{"COMPRESSION", "zstd", true},
+	{"PUSH_COMPRESSION", "gzip", true},
 	{"CACHE_FROM", "", true},
 	{"CACHE_TO", "", true},
 	{"BRANCH", "", false},
@@ -89,8 +92,11 @@ func main() {
 	if buildxErr != nil {
 		fail(buildxErr)
 	}
-	if len(cmd) == 0 || cmd[0] != "bake" || !readsStdin(cmd[1:]) {
+	if len(cmd) == 0 || cmd[0] != "bake" {
 		os.Exit(run(buildx, args, os.Stdin))
+	}
+	if !readsStdin(cmd[1:]) {
+		os.Exit(run(buildx, append(args, fileSets(buildx, args, cmd[1:], s)...), os.Stdin))
 	}
 	def, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -158,8 +164,10 @@ func loadSettings(file string) (settings, error) {
 		}
 		s.values[d.name] = v
 	}
-	if c := s.values["COMPRESSION"]; c.value != "gzip" && c.value != "zstd" {
-		return s, fmt.Errorf("%sCOMPRESSION (%s): %q, not gzip or zstd", envPrefix, c.source, c.value)
+	for _, n := range []string{"COMPRESSION", "PUSH_COMPRESSION"} {
+		if c := s.values[n]; c.value != "gzip" && c.value != "zstd" {
+			return s, fmt.Errorf("%s%s (%s): %q, not gzip or zstd", envPrefix, n, c.source, c.value)
+		}
 	}
 	return s, nil
 }
@@ -268,28 +276,84 @@ func defaultSets(def []byte, s settings) []string {
 	}
 	sort.Strings(names)
 	var sets []string
-	if s.get("COMPRESSION") == "zstd" {
-		for _, name := range names {
-			sets = append(sets, outputSets(name, d.Target[name].Output)...)
-		}
+	for _, name := range names {
+		sets = append(sets, outputSets(name, d.Target[name].Output, s)...)
 	}
 	return append(sets, cacheSets(names, d.Target, s)...)
 }
 
+// fileSets returns the --set arguments that compress the outputs of a bake
+// of the project's own files (not Compose's): its definition is the one bake
+// resolves with the same arguments, asked with --print
+func fileSets(buildx string, args, bakeArgs []string, s settings) []string {
+	if s.get("COMPRESSION") != "zstd" && s.get("PUSH_COMPRESSION") != "zstd" || !builds(bakeArgs) {
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	printCmd := exec.Command(buildx, append(append([]string{}, args...), "--print")...)
+	printCmd.Stdout, printCmd.Stderr = &stdout, &stderr
+	if err := printCmd.Run(); err != nil {
+		// The bake itself fails the same way, with bake's own error
+		warn("bake --print failed, building without the defaults: %v", err)
+		return nil
+	}
+	var d struct {
+		Target map[string]target `json:"target"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &d); err != nil {
+		warn("bake --print: not a bake definition, building without the defaults: %v", err)
+		return nil
+	}
+	names := make([]string, 0, len(d.Target))
+	for name := range d.Target {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var sets []string
+	for _, name := range names {
+		sets = append(sets, outputSets(name, d.Target[name].Output, s)...)
+	}
+	return sets
+}
+
+// builds tells whether a bake builds, rather than printing or listing its
+// definition, or checking it
+func builds(args []string) bool {
+	for _, a := range args {
+		flag, _, _ := strings.Cut(a, "=")
+		switch {
+		case flag == "--print", flag == "--check", flag == "--call", flag == "--help", flag == "-h",
+			strings.HasPrefix(flag, "--list"):
+			return false
+		}
+	}
+	return true
+}
+
 // outputSets compresses with zstd the outputs that load the image into the
-// local image store, as Compose's are: type=docker, or type=image without
-// push. Pushed images are left alone: who pulls them may not read zstd.
-func outputSets(name string, outputs []any) []string {
+// local image store, as Compose's are, when COMPRESSION is zstd: type=docker,
+// or type=image without push; and those that push it, when PUSH_COMPRESSION
+// is: type=registry, or type=image with push. Outputs are strings in Compose's
+// definitions (type=docker,...), objects in bake --print's.
+func outputSets(name string, outputs []any, s settings) []string {
 	values := make([]string, len(outputs))
 	changed := false
 	for i, o := range outputs {
-		s, ok := o.(string)
-		if !ok {
-			warn("%s: an output that isn't a string, left as it is: %v", name, o)
+		var attrs map[string]string
+		switch o := o.(type) {
+		case string:
+			values[i], attrs = o, parseAttrs(o)
+		case map[string]any:
+			attrs = map[string]string{}
+			for k, v := range o {
+				attrs[k] = fmt.Sprint(v)
+			}
+			values[i] = formatAttrs(attrs)
+		default:
+			warn("%s: an output that is neither a string nor an object, left as it is: %v", name, o)
 			return nil
 		}
-		values[i] = s
-		if loadsLocally(s) {
+		if compresses(attrs, s) {
 			values[i] += ",compression=zstd"
 			changed = true
 		}
@@ -297,7 +361,8 @@ func outputSets(name string, outputs []any) []string {
 	if !changed {
 		return nil
 	}
-	// The first replaces the target's outputs, the others add to them
+	// The first replaces the target's outputs (also those of --push and
+	// --load, which the values include), the others add to them
 	sets := []string{"--set", name + ".output=" + values[0]}
 	for _, v := range values[1:] {
 		sets = append(sets, "--set", name+".output+="+v)
@@ -305,17 +370,57 @@ func outputSets(name string, outputs []any) []string {
 	return sets
 }
 
-func loadsLocally(output string) bool {
-	attrs := map[string]string{}
-	for _, f := range strings.Split(output, ",") {
-		k, v, _ := strings.Cut(f, "=")
-		attrs[strings.TrimSpace(k)] = strings.TrimSpace(v)
-	}
+func compresses(attrs map[string]string, s settings) bool {
 	if _, set := attrs["compression"]; set {
 		return false // the project's own choice
 	}
 	push, _ := strconv.ParseBool(attrs["push"])
-	return attrs["type"] == "docker" || (attrs["type"] == "image" && !push)
+	switch t := attrs["type"]; {
+	case t == "docker" || t == "image" && !push:
+		return s.get("COMPRESSION") == "zstd"
+	case t == "registry" || t == "image" && push:
+		return s.get("PUSH_COMPRESSION") == "zstd"
+	}
+	return false
+}
+
+// parseAttrs reads an output's key=value fields, comma-separated, as CSV
+// (a value with commas is quoted: "name=a,b")
+func parseAttrs(output string) map[string]string {
+	attrs := map[string]string{}
+	fields, err := csv.NewReader(strings.NewReader(output)).Read()
+	if err != nil {
+		return attrs // bake rejects it itself
+	}
+	for _, f := range fields {
+		k, v, _ := strings.Cut(f, "=")
+		attrs[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return attrs
+}
+
+// formatAttrs writes an output's fields as bake reads them: type first, then
+// the others by name, quoted as CSV where needed
+func formatAttrs(attrs map[string]string) string {
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		if k != "type" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	var fields []string
+	if t, ok := attrs["type"]; ok {
+		fields = append(fields, "type="+t)
+	}
+	for _, k := range keys {
+		fields = append(fields, k+"="+attrs[k])
+	}
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	_ = w.Write(fields) // to a strings.Builder: can't fail
+	w.Flush()
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // cacheSets returns the --set arguments that add the cache to the targets

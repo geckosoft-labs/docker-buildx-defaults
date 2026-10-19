@@ -1,49 +1,64 @@
 # docker-buildx-defaults
 
-Defaults for the builds of Docker Compose that Compose has no global setting
-for, with no change to the projects:
+Defaults for bake builds (Docker Compose's among them) that buildx and
+Compose have no global setting for, with no change to the projects:
 
 - zstd compression of the images and of the cache, instead of BuildKit's
-  gzip: faster builds, and smaller uploads.
-- a layer cache shared through a registry: after a one-time setup,
-  `docker compose up --build` (and `docker compose build`) reuse the layers
-  that anyone already built, on any branch of the same repository,
-  developers and CI alike. Builds still run where they ran; only the layers
-  are shared.
+  gzip: faster builds, smaller uploads, and faster pulls where the images
+  run.
+- a layer cache shared through a registry, for Compose's builds: after a
+  one-time setup, `docker compose up --build` (and `docker compose build`)
+  reuse the layers that anyone already built, on any branch of the same
+  repository, developers and CI alike. Builds still run where they ran; only
+  the layers are shared.
 
 ## How it works
 
-Docker Compose builds by running `docker-buildx bake --file -`, with the build
-definition on stdin. docker-buildx-defaults is a `docker-buildx` that wraps
-the real one, installed where the docker CLI and Compose look for plugins
-before the system ones. It adds its settings to each target of the
-definition that comes from a Compose service.
+docker-buildx-defaults is a `docker-buildx` that wraps the real one,
+installed where the docker CLI and Compose look for plugins before the
+system ones. It adds its settings to bake's targets, with `--set`:
 
-Everything else (`docker buildx ...`, bake files of your own) passes through
-unchanged. Compose doesn't show the wrapper's warnings;
+- Docker Compose builds by running `docker-buildx bake --file -`, with the
+  build definition on stdin: the wrapper reads it, and adds its settings to
+  each target that comes from a Compose service.
+- Any other `docker buildx bake` (of the project's bake or Compose files,
+  e.g. a CI job that pushes images): the wrapper first asks the real one for
+  the definition it resolves from the same arguments (`bake --print`), and
+  adds the compression to its targets.
+
+Everything else (`docker buildx build`, the other commands, and bakes that
+only print, list or check) passes through unchanged. Compose doesn't show the
+wrapper's warnings;
 `docker buildx docker-buildx-defaults` shows the settings in effect, and where
 each comes from (see [Settings](#settings)).
 
 ### Compression
 
 BuildKit compresses layers with gzip, and has no setting for another default.
-With `DOCKER_BUILDX_DEFAULTS_COMPRESSION=zstd` (the default), the wrapper
-adds `compression=zstd`:
+The wrapper adds `compression=zstd`:
 
-- to the image outputs that load into the local image store, which is where
-  Compose's builds go (`type=docker`, or `type=image` without push). Pushed
-  images (`docker compose build --push`) keep gzip: whoever pulls them may
-  not read zstd. A project's own `compression=` is left alone.
-- to the exports of the [cache](#cache), when there's one.
+- with `DOCKER_BUILDX_DEFAULTS_COMPRESSION=zstd` (the default), to the image
+  outputs that load into the local image store, which is where Compose's
+  builds go (`type=docker`, or `type=image` without push), and to the exports
+  of the [cache](#cache), when there's one;
+- with `DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=zstd`, to the outputs that
+  push (`type=registry`, or `type=image` with push, as `--push` makes them),
+  of every platform. It's off by default (`gzip`): whoever pulls the images
+  must read zstd, e.g. Docker since 23.0, containerd since 1.5, Kubernetes
+  nodes with those, Amazon ECS on Fargate. Turn it on where you know who
+  pulls them, e.g. in CI for images that are deployed.
+
+A project's own `compression=` is left alone.
 
 Layers that are already compressed (pulled base images, layers imported from
-the cache) are kept as they are; only the ones built here are compressed
-with zstd. Exporting the images is the slowest step of many builds once the
-cache has the rest: in a stack with a 5 GB image, zstd cut it from 100 s to
-45 s, and its layers came out 4% smaller. Docker reads zstd layers since
-23.0, containerd since 1.5.
+the cache, layers the builder compressed with gzip for an earlier build) are
+kept as they are; only the ones compressed for this build use zstd. Exporting
+the images is the slowest step of many builds once the cache has the rest:
+in a stack with a 5 GB image, zstd cut it from 100 s to 45 s, and its layers
+came out 4% smaller.
 
-`DOCKER_BUILDX_DEFAULTS_COMPRESSION=gzip` leaves both to BuildKit.
+zstd layers come with OCI media types, which BuildKit then uses for the
+image. `gzip` leaves the outputs, and the cache, to BuildKit.
 
 ### Cache
 
@@ -164,10 +179,12 @@ Each release also has build provenance attestations:
 
 On runners and build agents, install the release binary as
 `/usr/local/lib/docker/cli-plugins/docker-buildx` (Linux), which the docker
-CLI searches before the package's `/usr/libexec/docker/cli-plugins`, and give
-the jobs `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`, `DOCKER_BUILDX_DEFAULTS_CACHE_TO`
-(in their environment, or in the config file of the user they run as) and
-the docker login of the registry's CI user.
+CLI searches before the package's `/usr/libexec/docker/cli-plugins`. In the
+config file of the user the jobs run as (or in their environment), set
+`DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=zstd` if what pulls the images reads
+zstd, and the cache's `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` and
+`DOCKER_BUILDX_DEFAULTS_CACHE_TO`, with the docker login of the registry's
+CI user.
 
 CI checks out a commit, not a branch, so the wrapper finds the branch
 elsewhere:
@@ -230,7 +247,8 @@ empty value is the default.
 
 | Setting | Default | |
 |---|---|---|
-| `DOCKER_BUILDX_DEFAULTS_COMPRESSION` | `zstd` | `zstd` or `gzip` (see [Compression](#compression)) |
+| `DOCKER_BUILDX_DEFAULTS_COMPRESSION` | `zstd` | Of the images loaded locally, and of the cache: `zstd` or `gzip` (see [Compression](#compression)) |
+| `DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION` | `gzip` | Of the images pushed: `zstd` or `gzip` |
 | `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | none | The locations to import the cache from, comma-separated, in order (see [Cache](#cache)) |
 | `DOCKER_BUILDX_DEFAULTS_CACHE_TO` | none | The location to export the cache to |
 | `DOCKER_BUILDX_DEFAULTS_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)); environment only |
@@ -256,6 +274,7 @@ directory's checkout:
 docker-buildx-defaults v0.2.0
 Config file: /home/me/.config/docker-buildx-defaults/config
 DOCKER_BUILDX_DEFAULTS_COMPRESSION=zstd (default)
+DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=gzip (default)
 DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci (/home/me/.config/docker-buildx-defaults/config)
 DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev (/home/me/.config/docker-buildx-defaults/config)
 DOCKER_BUILDX_DEFAULTS_BRANCH= (default)
@@ -272,8 +291,10 @@ shallow checkouts.
 
 - A location is as trustworthy as whoever can write it: e.g. a CI-only one
   as the jobs that can push there with the CI user's login.
-- Only Compose's builds get the defaults: not `docker buildx build` (e.g.
-  `docker/build-push-action`), nor bake files of a project's own.
+- Only bakes get the defaults, not `docker buildx build` (e.g.
+  `docker/build-push-action`); and only Compose's get the cache.
+- A bake of the project's files resolves its definition twice (once for
+  `bake --print`): a remote definition (a git URL) is fetched twice.
 - Secrets passed with `ARG`, or copied in and deleted in a later step, end up
   in the shared cache; `RUN --mount=type=secret` doesn't.
 - The wrapper relies on how Compose calls buildx, which isn't documented
