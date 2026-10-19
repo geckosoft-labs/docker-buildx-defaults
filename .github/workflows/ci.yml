@@ -27,4 +27,9 @@ jobs:
       - name: Build every release target
         run: ./build.sh dev
       - name: Lint the install scripts
-        run: shellcheck build.sh install.sh uninstall.sh
+        run: shellcheck build.sh install.sh uninstall.sh release-notes.sh
+      - name: Release notes of every version in the changelog
+        run: |
+          for v in $(awk '/^## v/ { print $2 }' CHANGELOG.md); do
+            ./release-notes.sh "$v" > /dev/null
+          done

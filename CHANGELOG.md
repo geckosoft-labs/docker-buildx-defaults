@@ -5,6 +5,8 @@ What changed in each release; the settings are described in
 
 ## Unreleased
 
+## v0.3.0 (2026-10-19)
+
 ### Added
 
 - Compression of pushed images: `DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION`
