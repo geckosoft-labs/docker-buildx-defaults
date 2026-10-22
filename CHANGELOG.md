@@ -5,6 +5,8 @@ What changed in each release; the settings are described in
 
 ## Unreleased
 
+## v0.4.1 (2026-10-22)
+
 ### Fixed
 
 - In a GitHub Actions pull request, the fallback branch is the one it merges
