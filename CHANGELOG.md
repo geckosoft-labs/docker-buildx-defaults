@@ -5,6 +5,17 @@ What changed in each release; the settings are described in
 
 ## Unreleased
 
+### Fixed
+
+- In a GitHub Actions pull request, the fallback branch is the one it merges
+  into (`GITHUB_BASE_REF`), before `origin/HEAD` and the repository's default
+  from the job's event, instead of the repository's default;
+  `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH` still comes first.
+- No fallback branch when nothing names it, instead of `main`, which may not
+  be a branch of the repository: builds import only their branch's cache. Set
+  `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH` where neither `origin/HEAD` nor
+  GitHub names it (e.g. `%vcsroot.branch%` in TeamCity).
+
 ## v0.4.0 (2026-10-22)
 
 ### Added
