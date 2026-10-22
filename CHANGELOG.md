@@ -5,6 +5,27 @@ What changed in each release; the settings are described in
 
 ## Unreleased
 
+### Added
+
+- The fallback branch, whose cache a branch's builds import after their own,
+  for CI's checkouts, which don't record `origin/HEAD`: until now it was the
+  default branch, `main` there, and repositories whose default is another
+  branch (e.g. `master`) got no cache from it. It's only imported.
+  - `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH` (environment only) names it, e.g.
+    `%vcsroot.branch%` in TeamCity; `refs/heads/` is dropped. It comes before
+    `origin/HEAD`.
+  - In GitHub Actions, without the setting or `origin/HEAD`, it's the
+    repository's default, from the job's event (`GITHUB_EVENT_PATH`), when
+    the checkout is of the workflow's repository.
+
+### Changed
+
+- TeamCity's `<default>` branch (the VCS root's branch specification doesn't
+  match the default branch) is the one `origin/HEAD` points to; without it
+  (TeamCity's checkouts don't record it), the build exports nothing, with a
+  warning, instead of exporting to `main`, which may be another branch. A
+  branch specification like `+:refs/heads/(*)` names the default branch.
+
 ## v0.3.0 (2026-10-19)
 
 ### Added

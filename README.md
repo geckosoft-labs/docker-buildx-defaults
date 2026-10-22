@@ -71,8 +71,9 @@ BuildKit.
 
 For each service that is built from a git checkout, the wrapper adds:
 
-- `cache-from` the current branch, then the repository's default branch, in
-  each location of `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`;
+- `cache-from` the current branch, then the fallback branch (by default the
+  repository's default branch), for a branch's first builds, in each location
+  of `DOCKER_BUILDX_DEFAULTS_CACHE_FROM`;
 - `cache-to` the current branch, in the location
   `DOCKER_BUILDX_DEFAULTS_CACHE_TO`, with `mode=max` (intermediate stages too)
   and `ignore-error=true` (a failed upload doesn't fail the build).
@@ -194,18 +195,31 @@ images reads zstd, and the cache's `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` and
 `DOCKER_BUILDX_DEFAULTS_CACHE_TO`, with the docker login of the registry's
 CI user.
 
-CI checks out a commit, not a branch, so the wrapper finds the branch
-elsewhere:
+CI checks out a commit, not a branch, and doesn't record which branch is the
+repository's default (`origin/HEAD`), so the wrapper finds both elsewhere.
+The branch is where the cache is exported, so it's never guessed: a build of
+an unknown branch exports nothing. The fallback branch is only imported.
 
 - GitHub Actions: `GITHUB_HEAD_REF` (the source branch of a pull request), or
   `GITHUB_REF_NAME` when the run is for a branch. A tag's build imports the
-  default branch and exports nothing.
+  fallback branch and exports nothing. The fallback branch is the
+  repository's default, from the job's event (`GITHUB_EVENT_PATH`), when the
+  checkout is of the workflow's repository.
 - TeamCity: set the parameter `env.DOCKER_BUILDX_DEFAULTS_BRANCH` to
-  `%teamcity.build.branch%` (e.g. in the root project, for every build):
-  `refs/heads/` is dropped, and `<default>` is the default branch.
-  TeamCity's server-side checkout leaves no `.git` on the agent: builds
-  checked out so don't use the cache.
-- Elsewhere: `DOCKER_BUILDX_DEFAULTS_BRANCH`.
+  `%teamcity.build.branch%`, the build's logical branch name (e.g. in the
+  root project, for every build); `refs/heads/` is dropped. The VCS root's
+  branch specification must match the default branch too, with logical names
+  that are the branches' own, e.g. `+:refs/heads/(*)`: otherwise its builds
+  get `<default>`, which is the branch `origin/HEAD` points to, and TeamCity's
+  checkouts don't record it, so they export nothing, with a warning. In the
+  build configurations (or templates) with one VCS root, set
+  `env.DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH` to `%vcsroot.branch%`, the VCS
+  root's default branch (in the others, the reference doesn't resolve, and
+  TeamCity doesn't start their builds); without it, the fallback branch is
+  `main`. TeamCity's server-side checkout leaves no `.git` on the agent:
+  builds checked out so don't use the cache.
+- Elsewhere: `DOCKER_BUILDX_DEFAULTS_BRANCH` and
+  `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH`.
 
 ## Registry
 
@@ -262,6 +276,7 @@ empty value is the default.
 | `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | none | The locations to import the cache from, comma-separated, in order (see [Cache](#cache)) |
 | `DOCKER_BUILDX_DEFAULTS_CACHE_TO` | none | The location to export the cache to |
 | `DOCKER_BUILDX_DEFAULTS_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)); environment only |
+| `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH` | the default branch: `origin/HEAD`, else GitHub's event, else `main` | The branch whose cache is imported after the branch's, never exported to (see [CI](#ci)); environment only |
 | `DOCKER_BUILDX_DEFAULTS_BUILDX` | found by the wrapper | The real `docker-buildx`, if the wrapper doesn't find it |
 
 The config file has a `KEY=VALUE` line per setting, with the same names;
@@ -290,14 +305,17 @@ DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION=omit (default)
 DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci (/home/me/.config/docker-buildx-defaults/config)
 DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev (/home/me/.config/docker-buildx-defaults/config)
 DOCKER_BUILDX_DEFAULTS_BRANCH= (default)
+DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH= (default)
 DOCKER_BUILDX_DEFAULTS_BUILDX= (default)
 Real docker-buildx: /usr/libexec/docker/cli-plugins/docker-buildx
-Here: acme/shop, branch "feature/x", default branch "main"
+Here: acme/shop, branch "feature/x", fallback branch "main"
 ```
 
-The default branch is the one `origin/HEAD` points to; `main` when the clone
-didn't record it (`git remote set-head origin --auto` records it), as in CI's
-shallow checkouts.
+The fallback branch is `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH`, else the
+repository's default branch: the one `origin/HEAD` points to, else, in GitHub
+Actions, the repository's (from the job's event); `main` when nothing names
+it, e.g. in CI's checkouts, which don't record `origin/HEAD`
+(`git remote set-head origin --auto` records it).
 
 ## Caveats
 
