@@ -520,7 +520,7 @@ func cacheSets(names []string, targets map[string]target, s settings) []string {
 				refs = append(refs, ref(l, c.branch))
 			}
 		}
-		if c.fallbackBranch != c.branch {
+		if c.fallbackBranch != "" && c.fallbackBranch != c.branch {
 			for _, l := range from {
 				refs = append(refs, ref(l, c.fallbackBranch))
 			}
@@ -600,7 +600,7 @@ func reachable(registry string) error {
 type checkout struct {
 	repo           string // <org>/<repo> of the origin remote, as a registry path
 	branch         string // "" when detached
-	fallbackBranch string // whose cache is imported after the branch's
+	fallbackBranch string // whose cache is imported after the branch's, "" if none
 }
 
 func inspect(dir string, s settings) checkout {
@@ -619,23 +619,25 @@ func inspect(dir string, s settings) checkout {
 }
 
 // fallbackBranch is the branch whose cache is imported after the branch's,
-// for its first builds: the FALLBACK_BRANCH setting, else the repository's
-// default branch, the one origin's HEAD points to, else, in a GitHub Actions
-// job of the same repository, its event's. CI's checkouts don't record
-// origin's HEAD (`git remote set-head origin --auto` does): main, the usual
-// one, when nothing names it. Only imported: a wrong guess costs cache hits,
-// and nothing is exported to it.
+// for its first builds, "" if nothing names one: the FALLBACK_BRANCH
+// setting, else, in a GitHub Actions job of the same repository, the branch
+// its pull request merges into, else the repository's default branch, the
+// one origin's HEAD points to, else, in a GitHub Actions job of the same
+// repository, its event's. CI's checkouts don't record origin's HEAD (`git
+// remote set-head origin --auto` does). Only imported: a wrong guess costs
+// cache hits, and nothing is exported to it.
 func fallbackBranch(dir, repo, setting string) string {
 	if b := strings.TrimPrefix(setting, "refs/heads/"); b != "" {
+		return b
+	}
+	// A job can check out other repositories
+	if b := os.Getenv("GITHUB_BASE_REF"); b != "" && repoPath(os.Getenv("GITHUB_REPOSITORY")) == repo {
 		return b
 	}
 	if b, ok := originHead(dir); ok {
 		return b
 	}
-	if b := githubDefaultBranch(repo); b != "" {
-		return b
-	}
-	return "main"
+	return githubDefaultBranch(repo)
 }
 
 // githubDefaultBranch is repo's default branch from the event of a GitHub

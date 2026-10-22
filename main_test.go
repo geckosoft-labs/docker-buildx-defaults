@@ -174,7 +174,7 @@ func TestLoadSettingsRejects(t *testing.T) {
 
 // clearCI unsets the variables of CI that branch and fallbackBranch read
 func clearCI(t *testing.T) {
-	for _, v := range []string{"GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_REF_TYPE", "GITHUB_EVENT_PATH"} {
+	for _, v := range []string{"GITHUB_HEAD_REF", "GITHUB_BASE_REF", "GITHUB_REPOSITORY", "GITHUB_REF_NAME", "GITHUB_REF_TYPE", "GITHUB_EVENT_PATH"} {
 		t.Setenv(v, "")
 	}
 }
@@ -261,26 +261,35 @@ func TestFallbackBranch(t *testing.T) {
 	dir := checkoutDir(t, "feature/x")
 	for _, c := range []struct {
 		setting string
+		base    string // the repository of a GitHub pull request into release/1.x
 		event   string // the repository of a GitHub event, whose default branch is trunk
 		want    string
 	}{
-		{"", "", "main"},
-		{"master", "", "master"},
-		{"refs/heads/master", "", "master"},
-		{"", "Org/App", "trunk"},
-		{"", "org/other", "main"},
-		{"master", "org/app", "master"},
+		{"", "", "", ""},
+		{"master", "", "", "master"},
+		{"refs/heads/master", "", "", "master"},
+		{"", "", "Org/App", "trunk"},
+		{"", "", "org/other", ""},
+		{"master", "", "org/app", "master"},
+		{"", "Org/App", "org/app", "release/1.x"},
+		{"", "org/other", "org/app", "trunk"},
+		{"master", "org/app", "org/app", "master"},
 	} {
 		clearCI(t)
+		if c.base != "" {
+			t.Setenv("GITHUB_REPOSITORY", c.base)
+			t.Setenv("GITHUB_BASE_REF", "release/1.x")
+		}
 		if c.event != "" {
 			githubEvent(t, c.event, "trunk")
 		}
 		if got := fallbackBranch(dir, "org/app", c.setting); got != c.want {
-			t.Errorf("%q, event of %q: %q, want %q", c.setting, c.event, got, c.want)
+			t.Errorf("%q, pull request of %q, event of %q: %q, want %q", c.setting, c.base, c.event, got, c.want)
 		}
 	}
 
-	// origin's HEAD, when the clone recorded it, comes after the setting only
+	// origin's HEAD, when the clone recorded it, comes after the setting and
+	// the pull request's base
 	setOriginHead(t, dir, "develop")
 	clearCI(t)
 	githubEvent(t, "org/app", "trunk")
@@ -289,6 +298,11 @@ func TestFallbackBranch(t *testing.T) {
 	}
 	if got := fallbackBranch(dir, "org/app", "master"); got != "master" {
 		t.Errorf("setting over origin's HEAD: %q, want master", got)
+	}
+	t.Setenv("GITHUB_REPOSITORY", "org/app")
+	t.Setenv("GITHUB_BASE_REF", "release/1.x")
+	if got := fallbackBranch(dir, "org/app", ""); got != "release/1.x" {
+		t.Errorf("pull request's base over origin's HEAD: %q, want release/1.x", got)
 	}
 }
 
@@ -339,6 +353,7 @@ func TestDefaultSetsCache(t *testing.T) {
 	dir := checkoutDir(t, "feature/x")
 	reg, down := registry(t), unreachable(t)
 	clearCI(t)
+	githubEvent(t, "org/app", "main") // the fallback branch
 	from := func(location, branch string) string {
 		return "web.cache-from+=type=registry,ref=" + location + "/org/app/web/linux-amd64:" + branch
 	}
@@ -393,6 +408,17 @@ func TestDefaultSetsCache(t *testing.T) {
 	}
 	if got := defaultSets(definition(dir), s); !reflect.DeepEqual(got, want) {
 		t.Errorf("zstd:\n got %q\nwant %q", got, want)
+	}
+
+	// Without a fallback branch, only the branch's
+	t.Setenv("GITHUB_EVENT_PATH", "")
+	s = envSettings(t, map[string]string{"CACHE_FROM": reg, "CACHE_TO": reg, "COMPRESSION": "gzip"})
+	want = []string{
+		"--set", from(reg, "feature-x"),
+		"--set", to(reg, "feature-x"),
+	}
+	if got := defaultSets(definition(dir), s); !reflect.DeepEqual(got, want) {
+		t.Errorf("no fallback:\n got %q\nwant %q", got, want)
 	}
 
 	// The fallback branch is only imported; TeamCity's <default>, unknown
