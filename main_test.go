@@ -132,6 +132,7 @@ func TestLoadSettings(t *testing.T) {
 		"FORCE_COMPRESSION":      {"omit", "default"},
 		"PUSH_FORCE_COMPRESSION": {"true", file},
 		"BRANCH":                 {"", "default"},
+		"FALLBACK_BRANCH":        {"", "default"},
 		"BUILDX":                 {"", "default"},
 	}
 	if !reflect.DeepEqual(s.values, want) {
@@ -152,11 +153,12 @@ func TestLoadSettingsRejects(t *testing.T) {
 		unsetenv(t, envPrefix+d.name)
 	}
 	for content, want := range map[string]string{
-		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=lz4":       `"lz4", not gzip or zstd`,
-		"DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=none": `PUSH_COMPRESSION (`,
-		"DOCKER_BUILDX_DEFAULTS_FORCE_COMPRESSION=yes": `"yes", not true, false or omit`,
-		"DOCKER_BUILDX_DEFAULTS_CACHE_FORM=reg":        ":1: unknown setting DOCKER_BUILDX_DEFAULTS_CACHE_FORM",
-		"# x\nDOCKER_BUILDX_DEFAULTS_BRANCH=main":      ":2: DOCKER_BUILDX_DEFAULTS_BRANCH is only read from the environment",
+		"DOCKER_BUILDX_DEFAULTS_COMPRESSION=lz4":        `"lz4", not gzip or zstd`,
+		"DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=none":  `PUSH_COMPRESSION (`,
+		"DOCKER_BUILDX_DEFAULTS_FORCE_COMPRESSION=yes":  `"yes", not true, false or omit`,
+		"DOCKER_BUILDX_DEFAULTS_CACHE_FORM=reg":         ":1: unknown setting DOCKER_BUILDX_DEFAULTS_CACHE_FORM",
+		"# x\nDOCKER_BUILDX_DEFAULTS_BRANCH=main":       ":2: DOCKER_BUILDX_DEFAULTS_BRANCH is only read from the environment",
+		"DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH=master": ":1: DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH is only read from the environment",
 		"reg/dev": ":1: not KEY=VALUE",
 		"DOCKER_BUILDX_DEFAULTS_CACHE_TO=a\nDOCKER_BUILDX_DEFAULTS_CACHE_TO=b": ":2: DOCKER_BUILDX_DEFAULTS_CACHE_TO set twice",
 	} {
@@ -170,9 +172,9 @@ func TestLoadSettingsRejects(t *testing.T) {
 	}
 }
 
-// clearCI unsets the variables of CI that branch reads
+// clearCI unsets the variables of CI that branch and fallbackBranch read
 func clearCI(t *testing.T) {
-	for _, v := range []string{"GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_REF_TYPE"} {
+	for _, v := range []string{"GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_REF_TYPE", "GITHUB_EVENT_PATH"} {
 		t.Setenv(v, "")
 	}
 }
@@ -203,7 +205,7 @@ func detach(t *testing.T, dir string) {
 func TestBranch(t *testing.T) {
 	dir := checkoutDir(t, "feature/x")
 	clearCI(t)
-	if got := branch(dir, "main", ""); got != "feature/x" {
+	if got := branch(dir, ""); got != "feature/x" {
 		t.Errorf("checked-out branch: %q", got)
 	}
 	detach(t, dir)
@@ -217,15 +219,76 @@ func TestBranch(t *testing.T) {
 		{"", map[string]string{"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v1.0"}, ""},
 		{"", map[string]string{"GITHUB_HEAD_REF": "feature/pr", "GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "12/merge"}, "feature/pr"},
 		{"refs/heads/feature/tc", nil, "feature/tc"},
-		{"<default>", nil, "main"},
+		// Not a guess: no export
+		{"<default>", nil, ""},
 	} {
 		clearCI(t)
 		for k, v := range c.env {
 			t.Setenv(k, v)
 		}
-		if got := branch(dir, "main", c.setting); got != c.want {
+		if got := branch(dir, c.setting); got != c.want {
 			t.Errorf("%q %v: %q, want %q", c.setting, c.env, got, c.want)
 		}
+	}
+
+	// origin's HEAD, when the clone recorded it, names <default>
+	setOriginHead(t, dir, "develop")
+	if got := branch(dir, "<default>"); got != "develop" {
+		t.Errorf("<default>, origin's HEAD: %q, want develop", got)
+	}
+}
+
+func setOriginHead(t *testing.T, dir, branch string) {
+	t.Helper()
+	if out, err := exec.Command("git", "-C", dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+branch).CombinedOutput(); err != nil {
+		t.Fatalf("git symbolic-ref: %v\n%s", err, out)
+	}
+}
+
+// githubEvent writes a GitHub Actions event of repo, with its default branch,
+// and points GITHUB_EVENT_PATH to it
+func githubEvent(t *testing.T, repo, defaultBranch string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "event.json")
+	event := `{"repository": {"full_name": "` + repo + `", "default_branch": "` + defaultBranch + `"}}`
+	if err := os.WriteFile(path, []byte(event), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_EVENT_PATH", path)
+}
+
+func TestFallbackBranch(t *testing.T) {
+	dir := checkoutDir(t, "feature/x")
+	for _, c := range []struct {
+		setting string
+		event   string // the repository of a GitHub event, whose default branch is trunk
+		want    string
+	}{
+		{"", "", "main"},
+		{"master", "", "master"},
+		{"refs/heads/master", "", "master"},
+		{"", "Org/App", "trunk"},
+		{"", "org/other", "main"},
+		{"master", "org/app", "master"},
+	} {
+		clearCI(t)
+		if c.event != "" {
+			githubEvent(t, c.event, "trunk")
+		}
+		if got := fallbackBranch(dir, "org/app", c.setting); got != c.want {
+			t.Errorf("%q, event of %q: %q, want %q", c.setting, c.event, got, c.want)
+		}
+	}
+
+	// origin's HEAD, when the clone recorded it, comes after the setting only
+	setOriginHead(t, dir, "develop")
+	clearCI(t)
+	githubEvent(t, "org/app", "trunk")
+	if got := fallbackBranch(dir, "org/app", ""); got != "develop" {
+		t.Errorf("origin's HEAD: %q, want develop", got)
+	}
+	if got := fallbackBranch(dir, "org/app", "master"); got != "master" {
+		t.Errorf("setting over origin's HEAD: %q, want master", got)
 	}
 }
 
@@ -330,6 +393,24 @@ func TestDefaultSetsCache(t *testing.T) {
 	}
 	if got := defaultSets(definition(dir), s); !reflect.DeepEqual(got, want) {
 		t.Errorf("zstd:\n got %q\nwant %q", got, want)
+	}
+
+	// The fallback branch is only imported; TeamCity's <default>, unknown
+	// without origin's HEAD, is neither imported nor exported
+	s = envSettings(t, map[string]string{"CACHE_FROM": reg, "CACHE_TO": reg, "COMPRESSION": "gzip", "FALLBACK_BRANCH": "master"})
+	want = []string{
+		"--set", from(reg, "feature-x"),
+		"--set", from(reg, "master"),
+		"--set", to(reg, "feature-x"),
+	}
+	if got := defaultSets(definition(dir), s); !reflect.DeepEqual(got, want) {
+		t.Errorf("fallback master:\n got %q\nwant %q", got, want)
+	}
+	detach(t, dir)
+	s = envSettings(t, map[string]string{"CACHE_FROM": reg, "CACHE_TO": reg, "COMPRESSION": "gzip", "FALLBACK_BRANCH": "master", "BRANCH": "<default>"})
+	want = []string{"--set", from(reg, "master")}
+	if got := defaultSets(definition(dir), s); !reflect.DeepEqual(got, want) {
+		t.Errorf("<default>, fallback master:\n got %q\nwant %q", got, want)
 	}
 }
 

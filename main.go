@@ -50,7 +50,8 @@ const (
 )
 
 // The settings, without envPrefix, with their defaults; an empty value is the
-// default. The branch is the build's, not the user's: not in the config file.
+// default. The branches are the build's, not the user's: not in the config
+// file.
 var settingDefs = []struct {
 	name, def string
 	inFile    bool
@@ -62,6 +63,7 @@ var settingDefs = []struct {
 	{"CACHE_FROM", "", true},
 	{"CACHE_TO", "", true},
 	{"BRANCH", "", false},
+	{"FALLBACK_BRANCH", "", false},
 	{"BUILDX", "", true},
 }
 
@@ -243,7 +245,7 @@ func printSettings(s settings, buildx string, buildxErr error) {
 	}
 	if dir, err := os.Getwd(); err == nil {
 		if c := inspect(dir, s); c.repo != "" {
-			fmt.Printf("Here: %s, branch %q, default branch %q\n", c.repo, c.branch, c.defaultBranch)
+			fmt.Printf("Here: %s, branch %q, fallback branch %q\n", c.repo, c.branch, c.fallbackBranch)
 		} else {
 			fmt.Println("Here: not a git checkout with an origin remote (no cache)")
 		}
@@ -510,16 +512,17 @@ func cacheSets(names []string, targets map[string]target, s settings) []string {
 		ref := func(location, branch string) string {
 			return location + "/" + image + ":" + tag(branch)
 		}
-		// The branch's caches first, then the default branch's
+		// The branch's caches first, then the fallback branch's, for a
+		// branch's first builds
 		var refs []string
 		if c.branch != "" {
 			for _, l := range from {
 				refs = append(refs, ref(l, c.branch))
 			}
 		}
-		if c.defaultBranch != c.branch {
+		if c.fallbackBranch != c.branch {
 			for _, l := range from {
-				refs = append(refs, ref(l, c.defaultBranch))
+				refs = append(refs, ref(l, c.fallbackBranch))
 			}
 		}
 		for _, r := range refs {
@@ -595,9 +598,9 @@ func reachable(registry string) error {
 }
 
 type checkout struct {
-	repo          string // <org>/<repo> of the origin remote, as a registry path
-	branch        string // "" when detached
-	defaultBranch string
+	repo           string // <org>/<repo> of the origin remote, as a registry path
+	branch         string // "" when detached
+	fallbackBranch string // whose cache is imported after the branch's
 }
 
 func inspect(dir string, s settings) checkout {
@@ -610,21 +613,72 @@ func inspect(dir string, s settings) checkout {
 		return c
 	}
 	c.repo = repoPath(url)
-	// Unknown when the clone didn't record origin's HEAD (`git remote
-	// set-head origin --auto` fixes it), as in CI's shallow checkouts: main is
-	// the usual one
-	c.defaultBranch = "main"
-	if head, ok := git(dir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); ok {
-		c.defaultBranch = strings.TrimPrefix(head, "origin/")
-	}
-	c.branch = branch(dir, c.defaultBranch, s.get("BRANCH"))
+	c.branch = branch(dir, s.get("BRANCH"))
+	c.fallbackBranch = fallbackBranch(dir, c.repo, s.get("FALLBACK_BRANCH"))
 	return c
 }
 
-// branch is the branch being built, "" if unknown. CI checks out a commit
-// (detached HEAD): TeamCity's builds name the branch in the BRANCH setting
-// (see README.md), GitHub's jobs in their own variables.
-func branch(dir, defaultBranch, setting string) string {
+// fallbackBranch is the branch whose cache is imported after the branch's,
+// for its first builds: the FALLBACK_BRANCH setting, else the repository's
+// default branch, the one origin's HEAD points to, else, in a GitHub Actions
+// job of the same repository, its event's. CI's checkouts don't record
+// origin's HEAD (`git remote set-head origin --auto` does): main, the usual
+// one, when nothing names it. Only imported: a wrong guess costs cache hits,
+// and nothing is exported to it.
+func fallbackBranch(dir, repo, setting string) string {
+	if b := strings.TrimPrefix(setting, "refs/heads/"); b != "" {
+		return b
+	}
+	if b, ok := originHead(dir); ok {
+		return b
+	}
+	if b := githubDefaultBranch(repo); b != "" {
+		return b
+	}
+	return "main"
+}
+
+// githubDefaultBranch is repo's default branch from the event of a GitHub
+// Actions job (GITHUB_EVENT_PATH), "" outside of one, for another repository
+// (a job can check out others) or an event without it
+func githubDefaultBranch(repo string) string {
+	path := os.Getenv("GITHUB_EVENT_PATH")
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		warn("the default branch, from the GitHub event: %v", err)
+		return ""
+	}
+	var event struct {
+		Repository struct {
+			FullName      string `json:"full_name"`
+			DefaultBranch string `json:"default_branch"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(b, &event); err != nil {
+		warn("the default branch, from the GitHub event %s: %v", path, err)
+		return ""
+	}
+	if repoPath(event.Repository.FullName) != repo {
+		return ""
+	}
+	return event.Repository.DefaultBranch
+}
+
+// originHead is the branch origin's HEAD points to, the repository's default,
+// when the clone recorded it
+func originHead(dir string) (string, bool) {
+	head, ok := git(dir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	return strings.TrimPrefix(head, "origin/"), ok
+}
+
+// branch is the branch being built, whose cache is exported, "" if unknown.
+// CI checks out a commit (detached HEAD): TeamCity's builds name the branch
+// in the BRANCH setting (see README.md), GitHub's jobs in their own
+// variables. No guesses: a wrong one would replace another branch's cache.
+func branch(dir, setting string) string {
 	b := setting
 	if b == "" {
 		b, _ = git(dir, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -638,7 +692,10 @@ func branch(dir, defaultBranch, setting string) string {
 	}
 	b = strings.TrimPrefix(b, "refs/heads/")
 	if b == "<default>" { // TeamCity's name for the default branch
-		b = defaultBranch
+		var ok bool
+		if b, ok = originHead(dir); !ok {
+			warn("the branch is TeamCity's <default> (the VCS root's branch specification doesn't match the default branch), and the checkout doesn't record origin's HEAD: not exporting the cache (see README.md)")
+		}
 	}
 	return b
 }
