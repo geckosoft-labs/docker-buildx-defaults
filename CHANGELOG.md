@@ -5,6 +5,8 @@ What changed in each release; the settings are described in
 
 ## Unreleased
 
+## v0.4.0 (2026-10-22)
+
 ### Added
 
 - The fallback branch, whose cache a branch's builds import after their own,
