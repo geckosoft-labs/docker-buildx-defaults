@@ -5,6 +5,8 @@ What changed in each release; the settings are described in
 
 ## Unreleased
 
+## v0.5.0 (2026-11-02)
+
 ### Added
 
 - `DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX` (environment only): the path of the
