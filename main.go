@@ -50,8 +50,8 @@ const (
 )
 
 // The settings, without envPrefix, with their defaults; an empty value is the
-// default. The branches are the build's, not the user's: not in the config
-// file.
+// default. The cache prefix and the branches are the build's, not the
+// user's: not in the config file.
 var settingDefs = []struct {
 	name, def string
 	inFile    bool
@@ -62,6 +62,7 @@ var settingDefs = []struct {
 	{"PUSH_FORCE_COMPRESSION", "omit", true},
 	{"CACHE_FROM", "", true},
 	{"CACHE_TO", "", true},
+	{"CACHE_PREFIX", "", false},
 	{"BRANCH", "", false},
 	{"FALLBACK_BRANCH", "", false},
 	{"BUILDX", "", true},
@@ -244,10 +245,10 @@ func printSettings(s settings, buildx string, buildxErr error) {
 		fmt.Println("Real docker-buildx:", buildx)
 	}
 	if dir, err := os.Getwd(); err == nil {
-		if c := inspect(dir, s); c.repo != "" {
-			fmt.Printf("Here: %s, branch %q, fallback branch %q\n", c.repo, c.branch, c.fallbackBranch)
+		if c := inspect(dir, s); c.prefix != "" {
+			fmt.Printf("Here: %s (%s), branch %q, fallback branch %q\n", c.prefix, c.prefixSource, c.branch, c.fallbackBranch)
 		} else {
-			fmt.Println("Here: not a git checkout with an origin remote (no cache)")
+			fmt.Println("Here: " + noPrefix + " (no cache)")
 		}
 	}
 }
@@ -502,13 +503,18 @@ func cacheSets(names []string, targets map[string]target, s settings) []string {
 			c = inspect(t.Context, s)
 			repos[t.Context] = c
 		}
-		if c.repo == "" {
-			continue // not a git checkout with an origin: nothing to share it with
+		if c.prefix == "" {
+			// Nothing to share it with: say so for a local context, whose
+			// builds could have had it (a remote one, a URL, never does)
+			if c.local {
+				warn("%s: %s, building without the cache", name, noPrefix)
+			}
+			continue
 		}
 		// One ref per platform: an export replaces the whole ref, so machines
 		// of different platforms building the same branch would replace each
 		// other's cache, which is of no use to the other
-		image := c.repo + "/" + pathComponent(t.Labels["com.docker.compose.service"]) + "/" + platformPath(t.Platforms)
+		image := c.prefix + "/" + pathComponent(t.Labels["com.docker.compose.service"]) + "/" + platformPath(t.Platforms)
 		ref := func(location, branch string) string {
 			return location + "/" + image + ":" + tag(branch)
 		}
@@ -598,24 +604,57 @@ func reachable(registry string) error {
 }
 
 type checkout struct {
-	repo           string // <org>/<repo> of the origin remote, as a registry path
-	branch         string // "" when detached
+	local          bool   // a directory, not a remote context (a URL)
+	remote         string // <org>/<repo> of the origin remote, as a registry path, "" without one
+	prefix         string // of the cache's refs, after the location: CACHE_PREFIX, else remote; "" for no cache
+	prefixSource   string // where prefix comes from, for printSettings
+	branch         string // "" when detached or unknown
 	fallbackBranch string // whose cache is imported after the branch's, "" if none
 }
 
+// What a context without a cache prefix lacks
+const noPrefix = "not a git checkout with an origin remote, and no " + envPrefix + "CACHE_PREFIX"
+
+// inspect finds what the cache of a build context needs: the prefix of its
+// refs, the CACHE_PREFIX setting (e.g. where CI checks out without .git),
+// else the origin remote's <org>/<repo>; and its branches. The remote still
+// tells GitHub's variables of this repository from those of another one.
 func inspect(dir string, s settings) checkout {
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		return checkout{} // a remote context (a URL), not a local checkout
 	}
-	var c checkout
-	url, ok := git(dir, "remote", "get-url", "origin")
-	if !ok {
+	c := checkout{local: true}
+	if url, ok := git(dir, "remote", "get-url", "origin"); ok {
+		c.remote = repoPath(url)
+	}
+	if setting := s.get("CACHE_PREFIX"); setting != "" {
+		c.prefix, c.prefixSource = cachePrefix(setting), envPrefix+"CACHE_PREFIX"
+		if c.prefix == "" {
+			warn("%sCACHE_PREFIX %q has nothing a registry path can hold: no cache", envPrefix, setting)
+			return checkout{}
+		}
+	} else if c.remote != "" {
+		c.prefix, c.prefixSource = c.remote, "origin remote"
+	}
+	if c.prefix == "" {
 		return c
 	}
-	c.repo = repoPath(url)
 	c.branch = branch(dir, s.get("BRANCH"))
-	c.fallbackBranch = fallbackBranch(dir, c.repo, s.get("FALLBACK_BRANCH"))
+	c.fallbackBranch = fallbackBranch(dir, c.remote, s.get("FALLBACK_BRANCH"))
 	return c
+}
+
+// cachePrefix makes the CACHE_PREFIX setting a registry path: each of its
+// /-separated parts as pathComponent makes it, without the empty ones, e.g.
+// "Geckosoft-Labs/cap3d/" is geckosoft-labs/cap3d
+func cachePrefix(setting string) string {
+	var parts []string
+	for _, p := range strings.Split(setting, "/") {
+		if p = pathComponent(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, "/")
 }
 
 // fallbackBranch is the branch whose cache is imported after the branch's,
@@ -630,8 +669,9 @@ func fallbackBranch(dir, repo, setting string) string {
 	if b := strings.TrimPrefix(setting, "refs/heads/"); b != "" {
 		return b
 	}
-	// A job can check out other repositories
-	if b := os.Getenv("GITHUB_BASE_REF"); b != "" && repoPath(os.Getenv("GITHUB_REPOSITORY")) == repo {
+	// A job can check out other repositories; without a remote, which one
+	// this is is unknown
+	if b := os.Getenv("GITHUB_BASE_REF"); b != "" && repo != "" && repoPath(os.Getenv("GITHUB_REPOSITORY")) == repo {
 		return b
 	}
 	if b, ok := originHead(dir); ok {
@@ -645,7 +685,7 @@ func fallbackBranch(dir, repo, setting string) string {
 // (a job can check out others) or an event without it
 func githubDefaultBranch(repo string) string {
 	path := os.Getenv("GITHUB_EVENT_PATH")
-	if path == "" {
+	if path == "" || repo == "" {
 		return ""
 	}
 	b, err := os.ReadFile(path)

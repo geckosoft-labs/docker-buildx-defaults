@@ -69,7 +69,8 @@ BuildKit.
 
 ### Cache
 
-For each service that is built from a git checkout, the wrapper adds:
+For each service that is built from a git checkout (or with a cache prefix,
+see below), the wrapper adds:
 
 - `cache-from` the current branch, then the fallback branch (by default the
   branch a pull request merges into, else the repository's default branch),
@@ -84,6 +85,12 @@ refs are `<location>/<org>/<repo>/<service>/<platform>:<branch>`, from the
 `origin` remote: e.g. `registry.example/dev/acme/shop/web/linux-arm64:feature-x`
 for the `web` service of `github.com/acme/shop`, built for `linux/arm64` on
 branch `feature/x`, in the location `registry.example/dev`.
+
+`DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX` (environment only, as it's the
+build's) replaces `<org>/<repo>`, with a checkout or without one (e.g. CI
+that checks out without `.git`): `DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX=shop`
+gives `registry.example/dev/shop/web/linux-arm64:feature-x`. Each of its
+`/`-separated parts is made valid in a registry path, as the remote's are.
 
 Who reads and writes which locations is up to you, and to the registry's
 access control (see [Registry](#registry)). For example:
@@ -110,8 +117,10 @@ The local build cache still comes first: the registry is only asked for the
 steps that aren't cached locally, so rebuilding the same branch is as fast as
 before, offline too.
 
-Services built without a git remote get no cache, and neither does anything
-when no location is set. The locations on a registry that's unreachable are
+Services built neither from a git checkout with an `origin` remote nor with
+a cache prefix get no cache, with a warning (which Compose doesn't show: see
+`docker buildx docker-buildx-defaults`, under [Settings](#settings)), and
+neither does anything when no location is set. The locations on a registry that's unreachable are
 left out, and the build goes on without them.
 
 ### Reading the build output
@@ -218,10 +227,14 @@ an unknown branch exports nothing. The fallback branch is only imported.
   `env.DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH` to `%vcsroot.branch%`, the VCS
   root's default branch (in the others, the reference doesn't resolve, and
   TeamCity doesn't start their builds); without it, there's no fallback
-  branch. TeamCity's server-side checkout leaves no `.git` on the agent:
-  builds checked out so don't use the cache.
+  branch. TeamCity's server-side checkout leaves no `.git` on the agent: set
+  `env.DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX` too, e.g. to the repository's
+  `<org>/<repo>` from a parameter of its project, or those builds don't use
+  the cache (and `<default>`, which needs `origin/HEAD`, exports nothing).
 - Elsewhere: `DOCKER_BUILDX_DEFAULTS_BRANCH` and
-  `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH`.
+  `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH`, and
+  `DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX` where the checkout has no `origin`
+  remote.
 
 ## Registry
 
@@ -277,6 +290,7 @@ empty value is the default.
 | `DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION` | `omit` | The same, for the images pushed |
 | `DOCKER_BUILDX_DEFAULTS_CACHE_FROM` | none | The locations to import the cache from, comma-separated, in order (see [Cache](#cache)) |
 | `DOCKER_BUILDX_DEFAULTS_CACHE_TO` | none | The location to export the cache to |
+| `DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX` | the `origin` remote's `<org>/<repo>` | The refs' path after the location, for CI that checks out without `.git`, or to name the project otherwise (see [Cache](#cache)); environment only |
 | `DOCKER_BUILDX_DEFAULTS_BRANCH` | the checked-out branch, or CI's variables | The branch, for CI that doesn't name it itself (see [CI](#ci)); environment only |
 | `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH` | GitHub's pull request's base, else the default branch: `origin/HEAD`, else GitHub's event; none if nothing names it | The branch whose cache is imported after the branch's, never exported to (see [CI](#ci)); environment only |
 | `DOCKER_BUILDX_DEFAULTS_BUILDX` | found by the wrapper | The real `docker-buildx`, if the wrapper doesn't find it |
@@ -306,11 +320,12 @@ DOCKER_BUILDX_DEFAULTS_PUSH_COMPRESSION=gzip (default)
 DOCKER_BUILDX_DEFAULTS_PUSH_FORCE_COMPRESSION=omit (default)
 DOCKER_BUILDX_DEFAULTS_CACHE_FROM=registry.example/dev,registry.example/ci (/home/me/.config/docker-buildx-defaults/config)
 DOCKER_BUILDX_DEFAULTS_CACHE_TO=registry.example/dev (/home/me/.config/docker-buildx-defaults/config)
+DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX= (default)
 DOCKER_BUILDX_DEFAULTS_BRANCH= (default)
 DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH= (default)
 DOCKER_BUILDX_DEFAULTS_BUILDX= (default)
 Real docker-buildx: /usr/libexec/docker/cli-plugins/docker-buildx
-Here: acme/shop, branch "feature/x", fallback branch "main"
+Here: acme/shop (origin remote), branch "feature/x", fallback branch "main"
 ```
 
 The fallback branch is `DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH`, else, in a

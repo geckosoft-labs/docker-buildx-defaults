@@ -127,6 +127,7 @@ func TestLoadSettings(t *testing.T) {
 	want := map[string]setting{
 		"CACHE_FROM":             {"reg/dev,reg/ci", file},
 		"CACHE_TO":               {"other/dev", "environment"},
+		"CACHE_PREFIX":           {"", "default"},
 		"COMPRESSION":            {"zstd", "environment"},
 		"PUSH_COMPRESSION":       {"zstd", file},
 		"FORCE_COMPRESSION":      {"omit", "default"},
@@ -159,6 +160,7 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"DOCKER_BUILDX_DEFAULTS_CACHE_FORM=reg":         ":1: unknown setting DOCKER_BUILDX_DEFAULTS_CACHE_FORM",
 		"# x\nDOCKER_BUILDX_DEFAULTS_BRANCH=main":       ":2: DOCKER_BUILDX_DEFAULTS_BRANCH is only read from the environment",
 		"DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH=master": ":1: DOCKER_BUILDX_DEFAULTS_FALLBACK_BRANCH is only read from the environment",
+		"DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX=app":       ":1: DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX is only read from the environment",
 		"reg/dev": ":1: not KEY=VALUE",
 		"DOCKER_BUILDX_DEFAULTS_CACHE_TO=a\nDOCKER_BUILDX_DEFAULTS_CACHE_TO=b": ":2: DOCKER_BUILDX_DEFAULTS_CACHE_TO set twice",
 	} {
@@ -459,6 +461,71 @@ func TestDefaultSetsCacheAddsNothing(t *testing.T) {
 	}
 	if got := defaultSets(definition(t.TempDir()), reg); got != nil {
 		t.Errorf("not a git checkout: %q", got)
+	}
+}
+
+func TestCachePrefix(t *testing.T) {
+	for setting, want := range map[string]string{
+		"cap3d":                 "cap3d",
+		"geckosoft-labs/cap3d":  "geckosoft-labs/cap3d",
+		"Geckosoft-Labs/Cap3D/": "geckosoft-labs/cap3d",
+		"/a//b c/":              "a/b-c",
+		"-/./_":                 "",
+	} {
+		if got := cachePrefix(setting); got != want {
+			t.Errorf("cachePrefix(%q) = %q, want %q", setting, got, want)
+		}
+	}
+}
+
+func TestDefaultSetsCachePrefix(t *testing.T) {
+	reg := registry(t)
+	clearCI(t)
+	refs := func(prefix, branch string, fallback ...string) []string {
+		ref := func(b string) string { return reg + "/" + prefix + "/web/linux-amd64:" + b }
+		var sets []string
+		for _, b := range append([]string{branch}, fallback...) {
+			sets = append(sets, "--set", "web.cache-from+=type=registry,ref="+ref(b))
+		}
+		return append(sets, "--set", "web.cache-to+=type=registry,ref="+ref(branch)+
+			",mode=max,ignore-error=true,image-manifest=true,oci-mediatypes=true")
+	}
+	settings := func(values map[string]string) settings {
+		values["CACHE_FROM"], values["CACHE_TO"], values["COMPRESSION"] = reg, reg, "gzip"
+		return envSettings(t, values)
+	}
+
+	// In a checkout, the setting replaces the origin remote's org/app
+	dir := checkoutDir(t, "feature/x")
+	s := settings(map[string]string{"CACHE_PREFIX": "App"})
+	if got, want := defaultSets(definition(dir), s), refs("app", "feature-x"); !reflect.DeepEqual(got, want) {
+		t.Errorf("checkout, CACHE_PREFIX:\n got %q\nwant %q", got, want)
+	}
+
+	// Without .git (e.g. TeamCity's server-side checkout), the setting and
+	// the branches from the environment give it a cache
+	plain := t.TempDir()
+	s = settings(map[string]string{"CACHE_PREFIX": "org/app", "BRANCH": "refs/heads/feature/tc", "FALLBACK_BRANCH": "master"})
+	if got, want := defaultSets(definition(plain), s), refs("org/app", "feature-tc", "master"); !reflect.DeepEqual(got, want) {
+		t.Errorf("no checkout, CACHE_PREFIX:\n got %q\nwant %q", got, want)
+	}
+
+	// Without .git, GitHub's variables are of an unknown repository: not this one
+	t.Setenv("GITHUB_REPOSITORY", "org/app")
+	t.Setenv("GITHUB_BASE_REF", "release/1.x")
+	githubEvent(t, "org/app", "trunk")
+	s = settings(map[string]string{"CACHE_PREFIX": "org/app", "BRANCH": "feature/tc"})
+	if got, want := defaultSets(definition(plain), s), refs("org/app", "feature-tc"); !reflect.DeepEqual(got, want) {
+		t.Errorf("no checkout, GitHub's variables:\n got %q\nwant %q", got, want)
+	}
+	clearCI(t)
+
+	// A setting with nothing a path can hold, or no setting: no cache
+	for _, prefix := range []string{"-/.", ""} {
+		s = settings(map[string]string{"CACHE_PREFIX": prefix, "BRANCH": "feature/tc"})
+		if got := defaultSets(definition(plain), s); got != nil {
+			t.Errorf("no checkout, CACHE_PREFIX %q: %q", prefix, got)
+		}
 	}
 }
 

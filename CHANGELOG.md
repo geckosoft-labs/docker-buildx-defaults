@@ -5,6 +5,24 @@ What changed in each release; the settings are described in
 
 ## Unreleased
 
+### Added
+
+- `DOCKER_BUILDX_DEFAULTS_CACHE_PREFIX` (environment only): the path of the
+  cache's refs after the location, instead of the `origin` remote's
+  `<org>/<repo>`. Builds without a checkout's `.git` (TeamCity's server-side
+  checkout) get the cache with it, and the branches from the environment.
+
+### Changed
+
+- A service that gets no cache for want of a checkout with an `origin`
+  remote, or of a cache prefix, says so (bake does; Compose doesn't show the
+  wrapper's warnings), instead of building without it silently.
+- `docker buildx docker-buildx-defaults` says where the cache prefix comes
+  from: `Here: acme/shop (origin remote), ...`.
+- GitHub's variables of the repository (the pull request's base, the event's
+  default branch) aren't used for a build without an `origin` remote, which
+  could be of another repository.
+
 ## v0.4.1 (2026-10-22)
 
 ### Fixed
