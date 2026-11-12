@@ -549,7 +549,7 @@ func cacheSets(names []string, targets map[string]target, s settings) []string {
 // comma-separated, in order) and exported to (CACHE_TO, none if empty): each
 // a registry with an optional path, host[:port][/path], e.g.
 // registry.example/dev. Who reads and writes where is up to the registry's
-// access control (see README.md).
+// access control (see docs/cache.md).
 func locations(s settings) (from []string, to string) {
 	for _, l := range strings.Split(s.get("CACHE_FROM"), ",") {
 		if l = location(l); l != "" {
@@ -717,9 +717,10 @@ func originHead(dir string) (string, bool) {
 }
 
 // branch is the branch being built, whose cache is exported, "" if unknown.
-// CI checks out a commit (detached HEAD): TeamCity's builds name the branch
-// in the BRANCH setting (see README.md), GitHub's jobs in their own
-// variables. No guesses: a wrong one would replace another branch's cache.
+// The checked-out one, where there's one; some CI checks out a commit
+// (detached HEAD) or no .git at all: GitHub's jobs name the branch in their
+// own variables, others (TeamCity's server-side checkout) in the BRANCH
+// setting (see docs/ci.md). No guesses: a wrong one would replace another branch's cache.
 func branch(dir, setting string) string {
 	b := setting
 	if b == "" {
@@ -736,7 +737,7 @@ func branch(dir, setting string) string {
 	if b == "<default>" { // TeamCity's name for the default branch
 		var ok bool
 		if b, ok = originHead(dir); !ok {
-			warn("the branch is TeamCity's <default> (the VCS root's branch specification doesn't match the default branch), and the checkout doesn't record origin's HEAD: not exporting the cache (see README.md)")
+			warn("the branch is TeamCity's <default> (the VCS root's branch specification doesn't match the default branch), and the checkout doesn't record origin's HEAD: not exporting the cache (see docs/teamcity.md)")
 		}
 	}
 	return b
